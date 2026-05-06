@@ -32,6 +32,13 @@ const clusterColors = ['#ef4444', '#f59e0b', '#2563eb', '#7c3aed', '#0891b2', '#
 
 const LIMA_METRO_CENTER = [-12.0464, -77.0428]
 
+const turnoByHour = (hour) => {
+  if (hour >= 0 && hour < 6) return 'madrugada'
+  if (hour >= 6 && hour < 12) return 'manana'
+  if (hour >= 12 && hour < 18) return 'tarde'
+  return 'noche'
+}
+
 const toNumber = (value) => {
   if (value === '' || value === null || value === undefined) return null
   const parsed = Number(value)
@@ -79,7 +86,10 @@ function MapClickPicker({ selectionMode, onPick }) {
 }
 
 function App() {
-  const [form, setForm] = useState(DEFAULT_FORM)
+  const [form, setForm] = useState(() => ({
+    ...DEFAULT_FORM,
+    turno: turnoByHour(new Date().getHours()),
+  }))
   const [originQuery, setOriginQuery] = useState('')
   const [destinationQuery, setDestinationQuery] = useState('')
   const [routeData, setRouteData] = useState(null)
@@ -91,6 +101,7 @@ function App() {
   const [geoStatus, setGeoStatus] = useState({ origin: '', destination: '' })
   const [geoLoading, setGeoLoading] = useState({ origin: false, destination: false })
   const [mapCenter, setMapCenter] = useState(LIMA_METRO_CENTER)
+  const [useCurrentTime, setUseCurrentTime] = useState(true)
 
   const routePositions = useMemo(
     () => routeData?.route.map((point) => [point.lat, point.lng]) ?? [],
@@ -99,12 +110,21 @@ function App() {
 
   const origin = parseCoordinatePair(form.originLat, form.originLng)
   const destination = parseCoordinatePair(form.destinationLat, form.destinationLng)
+  const effectiveTurno = useCurrentTime
+    ? turnoByHour(new Date().getHours())
+    : form.turno
 
   useEffect(() => {
     if (!navigator.geolocation) return
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        setMapCenter([position.coords.latitude, position.coords.longitude])
+        const coords = [position.coords.latitude, position.coords.longitude]
+        setMapCenter(coords)
+        setForm((currentForm) => ({
+          ...currentForm,
+          originLat: currentForm.originLat || coords[0].toFixed(6),
+          originLng: currentForm.originLng || coords[1].toFixed(6),
+        }))
       },
       () => {
         setMapCenter(LIMA_METRO_CENTER)
@@ -117,8 +137,8 @@ function App() {
     async function loadMapData() {
       try {
         const [zonesResponse, pointsResponse] = await Promise.all([
-          fetch(`${API_URL}/risk-zones?turno=${form.turno}`),
-          fetch(`${API_URL}/crime-points`),
+          fetch(`${API_URL}/risk-zones?turno=${effectiveTurno}`),
+          fetch(`${API_URL}/crime-points?turno=${effectiveTurno}`),
         ])
 
         if (!zonesResponse.ok) throw new Error('No se pudieron cargar las zonas.')
@@ -132,7 +152,7 @@ function App() {
     }
 
     loadMapData()
-  }, [form.turno])
+  }, [effectiveTurno])
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -154,7 +174,7 @@ function App() {
             lat: destination[0],
             lng: destination[1],
           },
-          turno: form.turno,
+          turno: effectiveTurno,
           safety_weight: Number(form.safetyWeight),
         }),
       })
@@ -171,6 +191,18 @@ function App() {
   function updateField(event) {
     const { name, value } = event.target
     setForm((currentForm) => ({ ...currentForm, [name]: value }))
+  }
+
+  function toggleCurrentTime() {
+    setUseCurrentTime((current) => {
+      if (current) {
+        setForm((currentForm) => ({
+          ...currentForm,
+          turno: turnoByHour(new Date().getHours()),
+        }))
+      }
+      return !current
+    })
   }
 
   function handlePickFromMap(type, latlng) {
@@ -370,12 +402,26 @@ function App() {
 
           <label>
             Turno
-            <select name="turno" value={form.turno} onChange={updateField}>
+            <select
+              name="turno"
+              value={effectiveTurno}
+              onChange={updateField}
+              disabled={useCurrentTime}
+            >
               <option value="manana">Mañana</option>
               <option value="tarde">Tarde</option>
               <option value="noche">Noche</option>
               <option value="madrugada">Madrugada</option>
             </select>
+          </label>
+
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={useCurrentTime}
+              onChange={toggleCurrentTime}
+            />
+            Usar turno según hora actual
           </label>
 
           <label>

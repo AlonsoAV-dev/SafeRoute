@@ -67,21 +67,23 @@ def _build_osm_graph(
     risk_model: RiskModel,
     safety_weight: float,
 ) -> tuple[nx.MultiDiGraph, int, int, Callable[[int], tuple[float, float]]]:
-    min_lat, max_lat = sorted([origin[0], destination[0]])
-    min_lng, max_lng = sorted([origin[1], destination[1]])
-    padding = 0.02
+    ox.settings.use_cache = True
+    ox.settings.log_console = False
 
-    north = max_lat + padding
-    south = min_lat - padding
-    east = max_lng + padding
-    west = min_lng - padding
+    mid_lat = (origin[0] + destination[0]) / 2
+    mid_lng = (origin[1] + destination[1]) / 2
+    straight_distance = haversine_m(origin[0], origin[1], destination[0], destination[1])
+    min_radius = 2000
+    max_radius = 6000
+    radius = min(max_radius, max(min_radius, straight_distance / 2 + 1000))
 
-    graph = ox.graph_from_bbox(
-        bbox=(north, south, east, west),
+    graph = ox.graph_from_point(
+        center_point=(mid_lat, mid_lng),
+        dist=radius,
         network_type="drive",
         simplify=True,
     )
-    graph = ox.add_edge_lengths(graph)
+    graph = ox.distance.add_edge_lengths(graph)
 
     node_risk = {
         node: risk_model.predict_point(data["y"], data["x"], turno).score
