@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.schemas import CrimePoint, RouteRequest, RouteResponse, RiskZone
@@ -49,13 +49,16 @@ def crime_points(turno: str | None = None) -> list[dict]:
 
 @app.post("/route", response_model=RouteResponse)
 def route(request: RouteRequest) -> dict:
-    route_data = generate_safe_route(
-        origin=(request.origin.lat, request.origin.lng),
-        destination=(request.destination.lat, request.destination.lng),
-        turno=request.turno,
-        risk_model=risk_model,
-        safety_weight=request.safety_weight,
-    )
+    try:
+        route_data = generate_safe_route(
+            origin=(request.origin.lat, request.origin.lng),
+            destination=(request.destination.lat, request.destination.lng),
+            turno=request.turno,
+            risk_model=risk_model,
+            safety_weight=request.safety_weight,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
     return {
         **route_data,
         "turno": request.turno,

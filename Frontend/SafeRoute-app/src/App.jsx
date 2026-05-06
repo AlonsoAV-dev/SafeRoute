@@ -6,6 +6,7 @@ import {
   Popup,
   TileLayer,
   useMap,
+  useMapEvents,
 } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
@@ -13,10 +14,10 @@ import './App.css'
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000'
 
 const DEFAULT_FORM = {
-  originLat: '-12.0464',
-  originLng: '-77.0428',
-  destinationLat: '-12.0905',
-  destinationLng: '-77.0068',
+  originLat: '',
+  originLng: '',
+  destinationLat: '',
+  destinationLng: '',
   turno: 'noche',
   safetyWeight: 4,
 }
@@ -29,6 +30,21 @@ const zoneColors = {
 
 const clusterColors = ['#ef4444', '#f59e0b', '#2563eb', '#7c3aed', '#0891b2', '#db2777']
 
+const LIMA_METRO_CENTER = [-12.0464, -77.0428]
+
+const toNumber = (value) => {
+  if (value === '' || value === null || value === undefined) return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const parseCoordinatePair = (latValue, lngValue) => {
+  const lat = toNumber(latValue)
+  const lng = toNumber(lngValue)
+  if (lat === null || lng === null) return null
+  return [lat, lng]
+}
+
 function FitRoute({ route }) {
   const map = useMap()
 
@@ -40,21 +56,62 @@ function FitRoute({ route }) {
   return null
 }
 
+function MapCenterUpdater({ center }) {
+  const map = useMap()
+
+  useEffect(() => {
+    if (!center) return
+    map.setView(center, map.getZoom(), { animate: true })
+  }, [map, center])
+
+  return null
+}
+
+function MapClickPicker({ selectionMode, onPick }) {
+  useMapEvents({
+    click(event) {
+      if (!selectionMode) return
+      onPick(selectionMode, event.latlng)
+    },
+  })
+
+  return null
+}
+
 function App() {
   const [form, setForm] = useState(DEFAULT_FORM)
+  const [originQuery, setOriginQuery] = useState('')
+  const [destinationQuery, setDestinationQuery] = useState('')
   const [routeData, setRouteData] = useState(null)
   const [riskZones, setRiskZones] = useState([])
   const [crimePoints, setCrimePoints] = useState([])
   const [status, setStatus] = useState('idle')
   const [error, setError] = useState('')
+  const [selectionMode, setSelectionMode] = useState(null)
+  const [geoStatus, setGeoStatus] = useState({ origin: '', destination: '' })
+  const [geoLoading, setGeoLoading] = useState({ origin: false, destination: false })
+  const [mapCenter, setMapCenter] = useState(LIMA_METRO_CENTER)
 
   const routePositions = useMemo(
     () => routeData?.route.map((point) => [point.lat, point.lng]) ?? [],
     [routeData],
   )
 
-  const origin = [Number(form.originLat), Number(form.originLng)]
-  const destination = [Number(form.destinationLat), Number(form.destinationLng)]
+  const origin = parseCoordinatePair(form.originLat, form.originLng)
+  const destination = parseCoordinatePair(form.destinationLat, form.destinationLng)
+
+  useEffect(() => {
+    if (!navigator.geolocation) return
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        setMapCenter([position.coords.latitude, position.coords.longitude])
+      },
+      () => {
+        setMapCenter(LIMA_METRO_CENTER)
+      },
+      { enableHighAccuracy: true, timeout: 8000, maximumAge: 60000 },
+    )
+  }, [])
 
   useEffect(() => {
     async function loadMapData() {
@@ -79,6 +136,11 @@ function App() {
 
   async function handleSubmit(event) {
     event.preventDefault()
+    if (!origin || !destination) {
+      setError('Selecciona un origen y un destino válidos.')
+      setStatus('error')
+      return
+    }
     setStatus('loading')
     setError('')
 
@@ -87,10 +149,10 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          origin: { lat: Number(form.originLat), lng: Number(form.originLng) },
+          origin: { lat: origin[0], lng: origin[1] },
           destination: {
-            lat: Number(form.destinationLat),
-            lng: Number(form.destinationLng),
+            lat: destination[0],
+            lng: destination[1],
           },
           turno: form.turno,
           safety_weight: Number(form.safetyWeight),
@@ -111,6 +173,67 @@ function App() {
     setForm((currentForm) => ({ ...currentForm, [name]: value }))
   }
 
+  function handlePickFromMap(type, latlng) {
+    setForm((currentForm) => ({
+      ...currentForm,
+      [`${type}Lat`]: latlng.lat.toFixed(6),
+      [`${type}Lng`]: latlng.lng.toFixed(6),
+    }))
+    setSelectionMode(null)
+  }
+
+  async function handleGeocode(type) {
+    const query = type === 'origin' ? originQuery : destinationQuery
+    if (!query.trim()) {
+      setGeoStatus((current) => ({
+        ...current,
+        [type]: 'Ingresa una dirección o referencia válida.',
+      }))
+      return
+    }
+
+    setGeoStatus((current) => ({ ...current, [type]: '' }))
+    setGeoLoading((current) => ({ ...current, [type]: true }))
+
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+          query,
+        )}`,
+        { headers: { 'Accept-Language': 'es' } },
+      )
+
+      if (!response.ok) throw new Error('No se pudo buscar la dirección.')
+      const results = await response.json()
+
+      if (!results.length) {
+        throw new Error('No se encontró una coincidencia para esa dirección.')
+      }
+
+      const result = results[0]
+      setForm((currentForm) => ({
+        ...currentForm,
+        [`${type}Lat`]: Number(result.lat).toFixed(6),
+        [`${type}Lng`]: Number(result.lon).toFixed(6),
+      }))
+
+      if (type === 'origin') {
+        setOriginQuery(result.display_name)
+      } else {
+        setDestinationQuery(result.display_name)
+      }
+
+      setSelectionMode(null)
+    } catch (requestError) {
+      setGeoStatus((current) => ({
+        ...current,
+        [type]: requestError.message,
+      }))
+    } finally {
+      setGeoLoading((current) => ({ ...current, [type]: false }))
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="control-panel">
@@ -122,6 +245,41 @@ function App() {
         <form onSubmit={handleSubmit} className="route-form">
           <fieldset>
             <legend>Origen</legend>
+            <label className="wide-field">
+              Buscar dirección
+              <input
+                name="originQuery"
+                value={originQuery}
+                onChange={(event) => setOriginQuery(event.target.value)}
+                placeholder="Ej. Av. Arequipa 123, Lima"
+              />
+            </label>
+            <div className="action-row wide-field">
+              <button
+                type="button"
+                className="action-button"
+                onClick={() => handleGeocode('origin')}
+                disabled={geoLoading.origin}
+              >
+                {geoLoading.origin ? 'Buscando...' : 'Buscar'}
+              </button>
+              <button
+                type="button"
+                className={
+                  selectionMode === 'origin'
+                    ? 'action-button action-button--active'
+                    : 'action-button'
+                }
+                onClick={() =>
+                  setSelectionMode((current) => (current === 'origin' ? null : 'origin'))
+                }
+              >
+                {selectionMode === 'origin' ? 'Seleccionando...' : 'Elegir en mapa'}
+              </button>
+            </div>
+            {geoStatus.origin && (
+              <p className="geo-status wide-field">{geoStatus.origin}</p>
+            )}
             <label>
               Latitud
               <input
@@ -144,6 +302,45 @@ function App() {
 
           <fieldset>
             <legend>Destino</legend>
+            <label className="wide-field">
+              Buscar dirección
+              <input
+                name="destinationQuery"
+                value={destinationQuery}
+                onChange={(event) => setDestinationQuery(event.target.value)}
+                placeholder="Ej. Plaza San Martín, Lima"
+              />
+            </label>
+            <div className="action-row wide-field">
+              <button
+                type="button"
+                className="action-button"
+                onClick={() => handleGeocode('destination')}
+                disabled={geoLoading.destination}
+              >
+                {geoLoading.destination ? 'Buscando...' : 'Buscar'}
+              </button>
+              <button
+                type="button"
+                className={
+                  selectionMode === 'destination'
+                    ? 'action-button action-button--active'
+                    : 'action-button'
+                }
+                onClick={() =>
+                  setSelectionMode((current) =>
+                    current === 'destination' ? null : 'destination',
+                  )
+                }
+              >
+                {selectionMode === 'destination'
+                  ? 'Seleccionando...'
+                  : 'Elegir en mapa'}
+              </button>
+            </div>
+            {geoStatus.destination && (
+              <p className="geo-status wide-field">{geoStatus.destination}</p>
+            )}
             <label>
               Latitud
               <input
@@ -163,6 +360,13 @@ function App() {
               />
             </label>
           </fieldset>
+
+          {selectionMode && (
+            <p className="selection-hint">
+              Haz clic en el mapa para fijar el{' '}
+              {selectionMode === 'origin' ? 'origen' : 'destino'}.
+            </p>
+          )}
 
           <label>
             Turno
@@ -234,18 +438,26 @@ function App() {
       </aside>
 
       <section className="map-area" aria-label="Mapa de rutas seguras">
-        <MapContainer center={origin} zoom={13} className="map">
+        <MapContainer center={mapCenter} zoom={13} className="map">
           <TileLayer
             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
 
-          <CircleMarker center={origin} radius={9} pathOptions={{ color: '#0f766e' }}>
-            <Popup>Origen</Popup>
-          </CircleMarker>
-          <CircleMarker center={destination} radius={9} pathOptions={{ color: '#2563eb' }}>
-            <Popup>Destino</Popup>
-          </CircleMarker>
+          <MapCenterUpdater center={mapCenter} />
+
+          <MapClickPicker selectionMode={selectionMode} onPick={handlePickFromMap} />
+
+          {origin && (
+            <CircleMarker center={origin} radius={9} pathOptions={{ color: '#0f766e' }}>
+              <Popup>Origen</Popup>
+            </CircleMarker>
+          )}
+          {destination && (
+            <CircleMarker center={destination} radius={9} pathOptions={{ color: '#2563eb' }}>
+              <Popup>Destino</Popup>
+            </CircleMarker>
+          )}
 
           {riskZones.map((zone) => (
             <CircleMarker

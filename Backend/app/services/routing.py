@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from math import ceil
+from typing import Callable
 
 import networkx as nx
+import osmnx as ox
 
 from app.services.risk_model import RiskModel, haversine_m, level_from_score
 
@@ -14,19 +16,36 @@ def generate_safe_route(
     risk_model: RiskModel,
     safety_weight: float,
 ) -> dict:
-    graph = _build_grid_graph(origin, destination, turno, risk_model, safety_weight)
-    start_node = min(graph.nodes, key=lambda node: haversine_m(origin[0], origin[1], node[0], node[1]))
-    end_node = min(graph.nodes, key=lambda node: haversine_m(destination[0], destination[1], node[0], node[1]))
+    def compute_path(graph, start_node, end_node, node_to_latlng):
+        return nx.astar_path(
+            graph,
+            start_node,
+            end_node,
+            heuristic=lambda a, b: haversine_m(
+                node_to_latlng(a)[0],
+                node_to_latlng(a)[1],
+                node_to_latlng(b)[0],
+                node_to_latlng(b)[1],
+            ),
+            weight="cost",
+        )
 
-    path = nx.astar_path(
-        graph,
-        start_node,
-        end_node,
-        heuristic=lambda a, b: haversine_m(a[0], a[1], b[0], b[1]),
-        weight="cost",
-    )
+    try:
+        graph, start_node, end_node, node_to_latlng = _build_osm_graph(
+            origin, destination, turno, risk_model, safety_weight
+        )
+        path = compute_path(graph, start_node, end_node, node_to_latlng)
+    except (nx.NetworkXNoPath, nx.NodeNotFound, ValueError):
+        graph, start_node, end_node, node_to_latlng = _build_grid_graph(
+            origin, destination, turno, risk_model, safety_weight
+        )
+        try:
+            path = compute_path(graph, start_node, end_node, node_to_latlng)
+        except (nx.NetworkXNoPath, nx.NodeNotFound) as error:
+            raise ValueError("No se encontró una ruta entre el origen y destino.") from error
 
-    route = [origin, *path[1:-1], destination]
+    path_coords = [node_to_latlng(node) for node in path]
+    route = [origin, *path_coords, destination]
     distance = sum(
         haversine_m(a[0], a[1], b[0], b[1])
         for a, b in zip(route, route[1:])
@@ -41,13 +60,58 @@ def generate_safe_route(
     }
 
 
+def _build_osm_graph(
+    origin: tuple[float, float],
+    destination: tuple[float, float],
+    turno: str,
+    risk_model: RiskModel,
+    safety_weight: float,
+) -> tuple[nx.MultiDiGraph, int, int, Callable[[int], tuple[float, float]]]:
+    min_lat, max_lat = sorted([origin[0], destination[0]])
+    min_lng, max_lng = sorted([origin[1], destination[1]])
+    padding = 0.02
+
+    north = max_lat + padding
+    south = min_lat - padding
+    east = max_lng + padding
+    west = min_lng - padding
+
+    graph = ox.graph_from_bbox(
+        bbox=(north, south, east, west),
+        network_type="drive",
+        simplify=True,
+    )
+    graph = ox.add_edge_lengths(graph)
+
+    node_risk = {
+        node: risk_model.predict_point(data["y"], data["x"], turno).score
+        for node, data in graph.nodes(data=True)
+    }
+
+    for u, v, key, data in graph.edges(keys=True, data=True):
+        length = data.get("length")
+        if length is None:
+            length = haversine_m(graph.nodes[u]["y"], graph.nodes[u]["x"], graph.nodes[v]["y"], graph.nodes[v]["x"])
+        risk = (node_risk[u] + node_risk[v]) / 2
+        data["cost"] = length * (1 + safety_weight * risk)
+
+    start_node = ox.distance.nearest_nodes(graph, origin[1], origin[0])
+    end_node = ox.distance.nearest_nodes(graph, destination[1], destination[0])
+
+    def node_to_latlng(node: int) -> tuple[float, float]:
+        data = graph.nodes[node]
+        return (float(data["y"]), float(data["x"]))
+
+    return graph, start_node, end_node, node_to_latlng
+
+
 def _build_grid_graph(
     origin: tuple[float, float],
     destination: tuple[float, float],
     turno: str,
     risk_model: RiskModel,
     safety_weight: float,
-) -> nx.Graph:
+) -> tuple[nx.Graph, tuple[float, float], tuple[float, float], Callable[[tuple[float, float]], tuple[float, float]]]:
     min_lat, max_lat = sorted([origin[0], destination[0]])
     min_lng, max_lng = sorted([origin[1], destination[1]])
     padding = 0.018
@@ -86,7 +150,13 @@ def _build_grid_graph(
             ) / 2
             graph.add_edge((lat, lng), neighbor, cost=distance * (1 + safety_weight * risk))
 
-    return graph
+    start_node = min(graph.nodes, key=lambda node: haversine_m(origin[0], origin[1], node[0], node[1]))
+    end_node = min(graph.nodes, key=lambda node: haversine_m(destination[0], destination[1], node[0], node[1]))
+
+    def node_to_latlng(node: tuple[float, float]) -> tuple[float, float]:
+        return node
+
+    return graph, start_node, end_node, node_to_latlng
 
 
 def _average_route_risk(
