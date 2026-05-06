@@ -53,13 +53,6 @@ def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
         dialect = csv.Sniffer().sniff(sample, delimiters=",;")
         reader = csv.DictReader(file, dialect=dialect)
         for row in reader:
-            estado_coord = (row.get("ESTADO_COORD") or "").strip().upper()
-            observacion = (row.get("OBSERVACION") or "").strip().upper()
-            if estado_coord == "SIN COORDENADA":
-                continue
-            if "GEO FORZADA" in observacion:
-                continue
-
             try:
                 lat = float(row.get("lat_hecho", ""))
                 lng = float(row.get("long_hecho", ""))

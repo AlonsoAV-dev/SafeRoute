@@ -1,15 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import {
-  CircleMarker,
-  MapContainer,
-  Polyline,
-  Popup,
-  TileLayer,
-  useMap,
-  useMapEvents,
-} from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import './App.css'
+import Sidebar from './components/Sidebar'
+import RoutePanel from './components/RoutePanel'
+import MapView from './components/MapView'
+import InfoPanel from './components/InfoPanel'
 
 const API_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000'
 
@@ -21,14 +16,6 @@ const DEFAULT_FORM = {
   turno: 'noche',
   safetyWeight: 4,
 }
-
-const zoneColors = {
-  bajo: '#15803d',
-  medio: '#ca8a04',
-  alto: '#dc2626',
-}
-
-const clusterColors = ['#ef4444', '#f59e0b', '#2563eb', '#7c3aed', '#0891b2', '#db2777']
 
 const LIMA_METRO_CENTER = [-12.0464, -77.0428]
 
@@ -52,39 +39,6 @@ const parseCoordinatePair = (latValue, lngValue) => {
   return [lat, lng]
 }
 
-function FitRoute({ route }) {
-  const map = useMap()
-
-  useEffect(() => {
-    if (route.length < 2) return
-    map.fitBounds(route, { padding: [36, 36] })
-  }, [map, route])
-
-  return null
-}
-
-function MapCenterUpdater({ center }) {
-  const map = useMap()
-
-  useEffect(() => {
-    if (!center) return
-    map.setView(center, map.getZoom(), { animate: true })
-  }, [map, center])
-
-  return null
-}
-
-function MapClickPicker({ selectionMode, onPick }) {
-  useMapEvents({
-    click(event) {
-      if (!selectionMode) return
-      onPick(selectionMode, event.latlng)
-    },
-  })
-
-  return null
-}
-
 function App() {
   const [form, setForm] = useState(() => ({
     ...DEFAULT_FORM,
@@ -92,7 +46,7 @@ function App() {
   }))
   const [originQuery, setOriginQuery] = useState('')
   const [destinationQuery, setDestinationQuery] = useState('')
-  const [routeData, setRouteData] = useState(null)
+  const [routeData, setRouteData] = useState({ safe: null, traditional: null })
   const [riskZones, setRiskZones] = useState([])
   const [crimePoints, setCrimePoints] = useState([])
   const [status, setStatus] = useState('idle')
@@ -102,10 +56,21 @@ function App() {
   const [geoLoading, setGeoLoading] = useState({ origin: false, destination: false })
   const [mapCenter, setMapCenter] = useState(LIMA_METRO_CENTER)
   const [useCurrentTime, setUseCurrentTime] = useState(true)
+  const [routePreference, setRoutePreference] = useState('safe')
+  const [travelDate, setTravelDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [travelTime, setTravelTime] = useState(() => new Date().toTimeString().slice(0, 5))
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true)
 
-  const routePositions = useMemo(
-    () => routeData?.route.map((point) => [point.lat, point.lng]) ?? [],
-    [routeData],
+  const safeRoute = routeData.safe
+  const traditionalRoute = routeData.traditional
+
+  const safeRoutePositions = useMemo(
+    () => safeRoute?.route.map((point) => [point.lat, point.lng]) ?? [],
+    [safeRoute],
+  )
+  const traditionalRoutePositions = useMemo(
+    () => traditionalRoute?.route.map((point) => [point.lat, point.lng]) ?? [],
+    [traditionalRoute],
   )
 
   const origin = parseCoordinatePair(form.originLat, form.originLng)
@@ -164,23 +129,35 @@ function App() {
     setStatus('loading')
     setError('')
 
-    try {
+    const payload = {
+      origin: { lat: origin[0], lng: origin[1] },
+      destination: { lat: destination[0], lng: destination[1] },
+      turno: effectiveTurno,
+    }
+
+    const fetchRoute = async (safetyWeight) => {
       const response = await fetch(`${API_URL}/route`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          origin: { lat: origin[0], lng: origin[1] },
-          destination: {
-            lat: destination[0],
-            lng: destination[1],
-          },
-          turno: effectiveTurno,
-          safety_weight: Number(form.safetyWeight),
+          ...payload,
+          safety_weight: safetyWeight,
         }),
       })
 
-      if (!response.ok) throw new Error('No se pudo generar la ruta.')
-      setRouteData(await response.json())
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({}))
+        throw new Error(errorBody.detail || 'No se pudo generar la ruta.')
+      }
+      return response.json()
+    }
+
+    try {
+      const [safeResponse, traditionalResponse] = await Promise.all([
+        fetchRoute(Number(form.safetyWeight)),
+        fetchRoute(0),
+      ])
+      setRouteData({ safe: safeResponse, traditional: traditionalResponse })
       setStatus('success')
     } catch (requestError) {
       setError(requestError.message)
@@ -204,6 +181,30 @@ function App() {
       return !current
     })
   }
+
+  const handlePreferenceChange = (preference) => {
+    setRoutePreference(preference)
+    setForm((currentForm) => ({
+      ...currentForm,
+      safetyWeight: preference === 'safe' ? 7 : 0,
+    }))
+  }
+
+  const estimateMinutes = (distanceKm, speedKmh = 25) => {
+    if (!distanceKm) return null
+    return Math.round((distanceKm / speedKmh) * 60)
+  }
+
+  const safeMinutes = estimateMinutes(safeRoute?.distance_km)
+  const traditionalMinutes = estimateMinutes(traditionalRoute?.distance_km)
+  const riskReduction = safeRoute && traditionalRoute
+    ? Math.max(
+        0,
+        Math.round(
+          (1 - safeRoute.risk_score / Math.max(traditionalRoute.risk_score, 0.01)) * 100,
+        ),
+      )
+    : null
 
   function handlePickFromMap(type, latlng) {
     setForm((currentForm) => ({
@@ -267,301 +268,56 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="control-panel">
-        <div>
-          <p className="eyebrow">SafeRoute Lima</p>
-          <h1>Recomendador de rutas seguras</h1>
-        </div>
+    <main className={`app-shell ${isSidebarOpen ? 'sidebar-open' : 'sidebar-collapsed'}`}>
+      <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen((current) => !current)} />
 
-        <form onSubmit={handleSubmit} className="route-form">
-          <fieldset>
-            <legend>Origen</legend>
-            <label className="wide-field">
-              Buscar dirección
-              <input
-                name="originQuery"
-                value={originQuery}
-                onChange={(event) => setOriginQuery(event.target.value)}
-                placeholder="Ej. Av. Arequipa 123, Lima"
-              />
-            </label>
-            <div className="action-row wide-field">
-              <button
-                type="button"
-                className="action-button"
-                onClick={() => handleGeocode('origin')}
-                disabled={geoLoading.origin}
-              >
-                {geoLoading.origin ? 'Buscando...' : 'Buscar'}
-              </button>
-              <button
-                type="button"
-                className={
-                  selectionMode === 'origin'
-                    ? 'action-button action-button--active'
-                    : 'action-button'
-                }
-                onClick={() =>
-                  setSelectionMode((current) => (current === 'origin' ? null : 'origin'))
-                }
-              >
-                {selectionMode === 'origin' ? 'Seleccionando...' : 'Elegir en mapa'}
-              </button>
-            </div>
-            {geoStatus.origin && (
-              <p className="geo-status wide-field">{geoStatus.origin}</p>
-            )}
-            <label>
-              Latitud
-              <input
-                name="originLat"
-                value={form.originLat}
-                onChange={updateField}
-                inputMode="decimal"
-              />
-            </label>
-            <label>
-              Longitud
-              <input
-                name="originLng"
-                value={form.originLng}
-                onChange={updateField}
-                inputMode="decimal"
-              />
-            </label>
-          </fieldset>
+      <section className="content">
+        <RoutePanel
+          form={form}
+          originQuery={originQuery}
+          destinationQuery={destinationQuery}
+          selectionMode={selectionMode}
+          geoLoading={geoLoading}
+          geoStatus={geoStatus}
+          travelDate={travelDate}
+          travelTime={travelTime}
+          useCurrentTime={useCurrentTime}
+          routePreference={routePreference}
+          status={status}
+          error={error}
+          effectiveTurno={effectiveTurno}
+          onOriginQueryChange={setOriginQuery}
+          onDestinationQueryChange={setDestinationQuery}
+          onSelectionModeChange={setSelectionMode}
+          onPreferenceChange={handlePreferenceChange}
+          onTravelDateChange={setTravelDate}
+          onTravelTimeChange={setTravelTime}
+          onUpdateField={updateField}
+          onToggleCurrentTime={toggleCurrentTime}
+          onGeocode={handleGeocode}
+          onSubmit={handleSubmit}
+        />
 
-          <fieldset>
-            <legend>Destino</legend>
-            <label className="wide-field">
-              Buscar dirección
-              <input
-                name="destinationQuery"
-                value={destinationQuery}
-                onChange={(event) => setDestinationQuery(event.target.value)}
-                placeholder="Ej. Plaza San Martín, Lima"
-              />
-            </label>
-            <div className="action-row wide-field">
-              <button
-                type="button"
-                className="action-button"
-                onClick={() => handleGeocode('destination')}
-                disabled={geoLoading.destination}
-              >
-                {geoLoading.destination ? 'Buscando...' : 'Buscar'}
-              </button>
-              <button
-                type="button"
-                className={
-                  selectionMode === 'destination'
-                    ? 'action-button action-button--active'
-                    : 'action-button'
-                }
-                onClick={() =>
-                  setSelectionMode((current) =>
-                    current === 'destination' ? null : 'destination',
-                  )
-                }
-              >
-                {selectionMode === 'destination'
-                  ? 'Seleccionando...'
-                  : 'Elegir en mapa'}
-              </button>
-            </div>
-            {geoStatus.destination && (
-              <p className="geo-status wide-field">{geoStatus.destination}</p>
-            )}
-            <label>
-              Latitud
-              <input
-                name="destinationLat"
-                value={form.destinationLat}
-                onChange={updateField}
-                inputMode="decimal"
-              />
-            </label>
-            <label>
-              Longitud
-              <input
-                name="destinationLng"
-                value={form.destinationLng}
-                onChange={updateField}
-                inputMode="decimal"
-              />
-            </label>
-          </fieldset>
-
-          {selectionMode && (
-            <p className="selection-hint">
-              Haz clic en el mapa para fijar el{' '}
-              {selectionMode === 'origin' ? 'origen' : 'destino'}.
-            </p>
-          )}
-
-          <label>
-            Turno
-            <select
-              name="turno"
-              value={effectiveTurno}
-              onChange={updateField}
-              disabled={useCurrentTime}
-            >
-              <option value="manana">Mañana</option>
-              <option value="tarde">Tarde</option>
-              <option value="noche">Noche</option>
-              <option value="madrugada">Madrugada</option>
-            </select>
-          </label>
-
-          <label className="toggle-row">
-            <input
-              type="checkbox"
-              checked={useCurrentTime}
-              onChange={toggleCurrentTime}
-            />
-            Usar turno según hora actual
-          </label>
-
-          <label>
-            Peso de seguridad: {form.safetyWeight}
-            <input
-              type="range"
-              name="safetyWeight"
-              min="0"
-              max="10"
-              step="1"
-              value={form.safetyWeight}
-              onChange={updateField}
-            />
-          </label>
-
-          <button type="submit" disabled={status === 'loading'}>
-            {status === 'loading' ? 'Calculando...' : 'Generar ruta'}
-          </button>
-        </form>
-
-        {error && <p className="error-message">{error}</p>}
-
-        <section className="summary">
-          <h2>Resultado</h2>
-          {routeData ? (
-            <dl>
-              <div>
-                <dt>Distancia</dt>
-                <dd>{routeData.distance_km} km</dd>
-              </div>
-              <div>
-                <dt>Riesgo</dt>
-                <dd className={`risk-pill ${routeData.risk_level}`}>
-                  {routeData.risk_level}
-                </dd>
-              </div>
-              <div>
-                <dt>Puntaje</dt>
-                <dd>{routeData.risk_score}</dd>
-              </div>
-            </dl>
-          ) : (
-            <p className="muted">Genera una ruta para ver el resumen.</p>
-          )}
-        </section>
-
-        <section className="map-layers">
-          <h2>Capas</h2>
-          <div className="layer-row">
-            <span className="layer-dot crime-dot"></span>
-            <span>Delitos validos</span>
-            <strong>{crimePoints.length}</strong>
-          </div>
-          <div className="layer-row">
-            <span className="layer-dot cluster-dot"></span>
-            <span>Clusters K-Means</span>
-            <strong>{riskZones.length}</strong>
-          </div>
-        </section>
-      </aside>
-
-      <section className="map-area" aria-label="Mapa de rutas seguras">
-        <MapContainer center={mapCenter} zoom={13} className="map">
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-
-          <MapCenterUpdater center={mapCenter} />
-
-          <MapClickPicker selectionMode={selectionMode} onPick={handlePickFromMap} />
-
-          {origin && (
-            <CircleMarker center={origin} radius={9} pathOptions={{ color: '#0f766e' }}>
-              <Popup>Origen</Popup>
-            </CircleMarker>
-          )}
-          {destination && (
-            <CircleMarker center={destination} radius={9} pathOptions={{ color: '#2563eb' }}>
-              <Popup>Destino</Popup>
-            </CircleMarker>
-          )}
-
-          {riskZones.map((zone) => (
-            <CircleMarker
-              key={zone.cluster}
-              center={[zone.center.lat, zone.center.lng]}
-              radius={Math.max(12, Math.min(36, zone.radius_m / 80))}
-              pathOptions={{
-                color: zoneColors[zone.risk_level],
-                fillColor: zoneColors[zone.risk_level],
-                fillOpacity: 0.22,
-              }}
-            >
-              <Popup>
-                Cluster {zone.cluster} · riesgo {zone.risk_level}
-                <br />
-                Delitos: {zone.total_crimes}
-              </Popup>
-            </CircleMarker>
-          ))}
-
-          {crimePoints.map((point) => (
-            <CircleMarker
-              key={point.id}
-              center={[point.location.lat, point.location.lng]}
-              radius={3}
-              pathOptions={{
-                color: clusterColors[point.cluster % clusterColors.length],
-                fillColor: clusterColors[point.cluster % clusterColors.length],
-                fillOpacity: 0.72,
-                opacity: 0.9,
-                weight: 1,
-              }}
-            >
-              <Popup>
-                Delito #{point.id}
-                <br />
-                Cluster {point.cluster}
-                <br />
-                {point.distrito}
-                <br />
-                {point.tipo} - {point.subtipo}
-                <br />
-                Turno: {point.turno}
-              </Popup>
-            </CircleMarker>
-          ))}
-
-          {routePositions.length > 1 && (
-            <>
-              <Polyline
-                positions={routePositions}
-                pathOptions={{ color: '#0f766e', weight: 6, opacity: 0.9 }}
-              />
-              <FitRoute route={routePositions} />
-            </>
-          )}
-        </MapContainer>
+        <MapView
+          mapCenter={mapCenter}
+          selectionMode={selectionMode}
+          onPick={handlePickFromMap}
+          origin={origin}
+          destination={destination}
+          riskZones={riskZones}
+          crimePoints={crimePoints}
+          safeRoutePositions={safeRoutePositions}
+          traditionalRoutePositions={traditionalRoutePositions}
+        />
       </section>
+
+      <InfoPanel
+        safeRoute={safeRoute}
+        traditionalRoute={traditionalRoute}
+        safeMinutes={safeMinutes}
+        traditionalMinutes={traditionalMinutes}
+        riskReduction={riskReduction}
+      />
     </main>
   )
 }
