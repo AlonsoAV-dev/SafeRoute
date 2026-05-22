@@ -15,6 +15,7 @@ def generate_safe_route(
     turno: str,
     risk_model: RiskModel,
     safety_weight: float,
+    alpha: float | None = None,
 ) -> dict:
     def compute_path(graph, start_node, end_node, node_to_latlng):
         return nx.astar_path(
@@ -32,12 +33,12 @@ def generate_safe_route(
 
     try:
         graph, start_node, end_node, node_to_latlng = _build_osm_graph(
-            origin, destination, turno, risk_model, safety_weight
+            origin, destination, turno, risk_model, safety_weight, alpha
         )
         path = compute_path(graph, start_node, end_node, node_to_latlng)
     except (nx.NetworkXNoPath, nx.NodeNotFound, ValueError):
         graph, start_node, end_node, node_to_latlng = _build_grid_graph(
-            origin, destination, turno, risk_model, safety_weight
+            origin, destination, turno, risk_model, safety_weight, alpha
         )
         try:
             path = compute_path(graph, start_node, end_node, node_to_latlng)
@@ -66,6 +67,7 @@ def _build_osm_graph(
     turno: str,
     risk_model: RiskModel,
     safety_weight: float,
+    alpha: float | None,
 ) -> tuple[nx.MultiDiGraph, int, int, Callable[[int], tuple[float, float]]]:
     ox.settings.use_cache = True
     ox.settings.log_console = False
@@ -95,7 +97,7 @@ def _build_osm_graph(
         if length is None:
             length = haversine_m(graph.nodes[u]["y"], graph.nodes[u]["x"], graph.nodes[v]["y"], graph.nodes[v]["x"])
         risk = (node_risk[u] + node_risk[v]) / 2
-        data["cost"] = length * (1 + safety_weight * risk)
+        data["cost"] = _edge_cost(length, risk, safety_weight, alpha)
 
     start_node = ox.distance.nearest_nodes(graph, origin[1], origin[0])
     end_node = ox.distance.nearest_nodes(graph, destination[1], destination[0])
@@ -113,6 +115,7 @@ def _build_grid_graph(
     turno: str,
     risk_model: RiskModel,
     safety_weight: float,
+    alpha: float | None,
 ) -> tuple[nx.Graph, tuple[float, float], tuple[float, float], Callable[[tuple[float, float]], tuple[float, float]]]:
     min_lat, max_lat = sorted([origin[0], destination[0]])
     min_lng, max_lng = sorted([origin[1], destination[1]])
@@ -150,7 +153,7 @@ def _build_grid_graph(
                 risk_model.predict_point(lat, lng, turno).score
                 + risk_model.predict_point(neighbor[0], neighbor[1], turno).score
             ) / 2
-            graph.add_edge((lat, lng), neighbor, cost=distance * (1 + safety_weight * risk))
+            graph.add_edge((lat, lng), neighbor, cost=_edge_cost(distance, risk, safety_weight, alpha))
 
     start_node = min(graph.nodes, key=lambda node: haversine_m(origin[0], origin[1], node[0], node[1]))
     end_node = min(graph.nodes, key=lambda node: haversine_m(destination[0], destination[1], node[0], node[1]))
@@ -168,4 +171,10 @@ def _average_route_risk(
 ) -> float:
     scores = [risk_model.predict_point(lat, lng, turno).score for lat, lng in route]
     return sum(scores) / len(scores)
+
+
+def _edge_cost(distance_m: float, risk_score: float, safety_weight: float, alpha: float | None) -> float:
+    if alpha is not None:
+        return distance_m * ((1 - alpha) + alpha * risk_score)
+    return distance_m * (1 + safety_weight * risk_score)
 

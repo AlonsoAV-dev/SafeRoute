@@ -1,9 +1,33 @@
+import {
+  AlertTriangle,
+  BarChart2,
+  Clock,
+  Home,
+  Info,
+  MapPin,
+  Settings,
+  Shield,
+} from 'lucide-react'
+
+const NAV_ITEMS = [
+  { label: 'Inicio', icon: Home, active: true },
+  { label: 'Nueva ruta', icon: MapPin },
+  { label: 'Historial', icon: Clock },
+  { label: 'Zonas de riesgo', icon: AlertTriangle },
+  { label: 'Estadísticas', icon: BarChart2 },
+  { label: 'Configuración', icon: Settings },
+  { label: 'Acerca de', icon: Info },
+]
+
 function Sidebar({ isOpen, onToggle }) {
   return (
     <aside className={`sidebar ${isOpen ? 'is-open' : 'is-collapsed'}`}>
       <div className="sidebar-header">
         <div className="brand">
-          <div className="brand-icon">SR</div>
+          <div className="brand-icon">
+            <Shield size={16} />
+            <span>K</span>
+          </div>
           <div>
             <p className="brand-name">SafeRoute</p>
             <span>Rutas óptimas y seguras</span>
@@ -21,17 +45,25 @@ function Sidebar({ isOpen, onToggle }) {
         </button>
       </div>
       <nav className="nav-menu">
-        <button type="button" className="nav-item nav-item--active">Inicio</button>
-        <button type="button" className="nav-item">Nueva ruta</button>
-        <button type="button" className="nav-item">Historial</button>
-        <button type="button" className="nav-item">Zonas de riesgo</button>
-        <button type="button" className="nav-item">Estadísticas</button>
-        <button type="button" className="nav-item">Configuración</button>
-        <button type="button" className="nav-item">Acerca de</button>
+        {NAV_ITEMS.map(({ label, icon: Icon, active }) => (
+          <button
+            key={label}
+            type="button"
+            className={active ? 'nav-item nav-item--active' : 'nav-item'}
+          >
+            <Icon size={16} />
+            <span>{label}</span>
+          </button>
+        ))}
       </nav>
       <div className="sidebar-card">
-        <h3>Tu seguridad</h3>
-        <p>Es nuestra prioridad en Lima Metropolitana.</p>
+        <div className="sidebar-card-icon">
+          <Shield size={28} />
+        </div>
+        <div>
+          <h3>Tu seguridad es nuestra prioridad</h3>
+          <p>Rutas inteligentes con datos reales de Lima Metropolitana.</p>
+        </div>
       </div>
     </aside>
   )

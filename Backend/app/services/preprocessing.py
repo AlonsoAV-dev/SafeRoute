@@ -44,18 +44,37 @@ def is_valid_coordinate(lat: float, lng: float) -> bool:
     )
 
 
+def _parse_float(value: str | None) -> float:
+    cleaned = (value or "").strip().replace(",", ".")
+    if not cleaned:
+        raise ValueError("empty numeric value")
+    return float(cleaned)
+
+
+def _first_non_empty(row: dict[str, str], keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = (row.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
     records: list[CrimeRecord] = []
 
     with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
         sample = file.read(4096)
         file.seek(0)
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;")
+        except csv.Error:
+            dialect = csv.excel
+            dialect.delimiter = ";"
         reader = csv.DictReader(file, dialect=dialect)
         for row in reader:
             try:
-                lat = float(row.get("lat_hecho", ""))
-                lng = float(row.get("long_hecho", ""))
+                lat = _parse_float(_first_non_empty(row, ("lat_hecho", "y")))
+                lng = _parse_float(_first_non_empty(row, ("long_hecho", "x")))
             except ValueError:
                 continue
 
@@ -66,11 +85,11 @@ def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
                 CrimeRecord(
                     lat=lat,
                     lng=lng,
-                    turno=normalize_turno(row.get("turno_hecho", "")),
-                    tipo=(row.get("tipo_hecho") or "NO ESPECIFICADO").strip().upper(),
-                    subtipo=(row.get("subtipo_hecho") or "NO ESPECIFICADO").strip().upper(),
-                    distrito=(row.get("distrito_hecho") or "NO ESPECIFICADO").strip().upper(),
-                    fecha=(row.get("fecha_hora_hecho") or "").strip(),
+                    turno=normalize_turno(_first_non_empty(row, ("turno_hecho", "turno"))),
+                    tipo=(_first_non_empty(row, ("tipo_hecho", "tipo")) or "NO ESPECIFICADO").upper(),
+                    subtipo=(_first_non_empty(row, ("subtipo_hecho", "subtipo")) or "NO ESPECIFICADO").upper(),
+                    distrito=(_first_non_empty(row, ("distrito_hecho", "distrito")) or "NO ESPECIFICADO").upper(),
+                    fecha=_first_non_empty(row, ("fecha_hora_hecho", "fecha_hora_registro_hecho", "fecha")),
                 )
             )
 

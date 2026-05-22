@@ -5,8 +5,9 @@ import Sidebar from './components/Sidebar'
 import RoutePanel from './components/RoutePanel'
 import MapView from './components/MapView'
 import InfoPanel from './components/InfoPanel'
+import BottomMetrics from './components/BottomMetrics'
 
-const API_URL = import.meta.env.VITE_API_URL ?? 'http://127.0.0.1:8000'
+const API_URL = 'http://127.0.0.1:8000/api'
 
 const DEFAULT_FORM = {
   originLat: '',
@@ -14,7 +15,7 @@ const DEFAULT_FORM = {
   destinationLat: '',
   destinationLng: '',
   turno: 'noche',
-  safetyWeight: 4,
+  safetyWeight: 0.7,
 }
 
 const LIMA_METRO_CENTER = [-12.0464, -77.0428]
@@ -48,7 +49,12 @@ function App() {
   const [destinationQuery, setDestinationQuery] = useState('')
   const [routeData, setRouteData] = useState({ safe: null, traditional: null })
   const [riskZones, setRiskZones] = useState([])
-  const [crimePoints, setCrimePoints] = useState([])
+  const [heatmapPoints, setHeatmapPoints] = useState([])
+  const [systemStats, setSystemStats] = useState({
+    model_accuracy: 0,
+    zones_count: 0,
+    calc_time_ms: 0,
+  })
   const [status, setStatus] = useState('idle')
   const [error, setError] = useState('')
   const [selectionMode, setSelectionMode] = useState(null)
@@ -60,6 +66,7 @@ function App() {
   const [travelDate, setTravelDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [travelTime, setTravelTime] = useState(() => new Date().toTimeString().slice(0, 5))
   const [isSidebarOpen, setIsSidebarOpen] = useState(true)
+  const [isResultsMinimized, setIsResultsMinimized] = useState(false)
 
   const safeRoute = routeData.safe
   const traditionalRoute = routeData.traditional
@@ -101,16 +108,18 @@ function App() {
   useEffect(() => {
     async function loadMapData() {
       try {
-        const [zonesResponse, pointsResponse] = await Promise.all([
+        const [zonesResponse, heatmapResponse] = await Promise.all([
           fetch(`${API_URL}/risk-zones?turno=${effectiveTurno}`),
-          fetch(`${API_URL}/crime-points?turno=${effectiveTurno}`),
+          fetch(`${API_URL}/heatmap?turno=${effectiveTurno}`),
         ])
 
         if (!zonesResponse.ok) throw new Error('No se pudieron cargar las zonas.')
-        if (!pointsResponse.ok) throw new Error('No se pudieron cargar los delitos.')
+        if (!heatmapResponse.ok) throw new Error('No se pudo cargar el mapa de riesgo.')
 
-        setRiskZones(await zonesResponse.json())
-        setCrimePoints(await pointsResponse.json())
+        const zonesData = await zonesResponse.json()
+        const heatmapData = await heatmapResponse.json()
+        setRiskZones(zonesData.zones ?? [])
+        setHeatmapPoints(heatmapData.points ?? [])
       } catch (requestError) {
         setError(requestError.message)
       }
@@ -118,6 +127,21 @@ function App() {
 
     loadMapData()
   }, [effectiveTurno])
+
+  useEffect(() => {
+    async function loadStats() {
+      try {
+        const response = await fetch(`${API_URL}/stats`)
+        if (!response.ok) return
+        const data = await response.json()
+        setSystemStats(data)
+      } catch (requestError) {
+        console.error(requestError)
+      }
+    }
+
+    loadStats()
+  }, [])
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -129,19 +153,19 @@ function App() {
     setStatus('loading')
     setError('')
 
-    const payload = {
-      origin: { lat: origin[0], lng: origin[1] },
-      destination: { lat: destination[0], lng: destination[1] },
-      turno: effectiveTurno,
-    }
+    const timeValue = useCurrentTime
+      ? new Date().toISOString().slice(0, 16)
+      : `${travelDate}T${travelTime}`
 
-    const fetchRoute = async (safetyWeight) => {
-      const response = await fetch(`${API_URL}/route`, {
+    try {
+      const response = await fetch(`${API_URL}/route/calculate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          ...payload,
-          safety_weight: safetyWeight,
+          origin: [origin[0], origin[1]],
+          destination: [destination[0], destination[1]],
+          alpha: Number(form.safetyWeight),
+          datetime: timeValue,
         }),
       })
 
@@ -149,15 +173,9 @@ function App() {
         const errorBody = await response.json().catch(() => ({}))
         throw new Error(errorBody.detail || 'No se pudo generar la ruta.')
       }
-      return response.json()
-    }
 
-    try {
-      const [safeResponse, traditionalResponse] = await Promise.all([
-        fetchRoute(Number(form.safetyWeight)),
-        fetchRoute(0),
-      ])
-      setRouteData({ safe: safeResponse, traditional: traditionalResponse })
+      const data = await response.json()
+      setRouteData({ safe: data.safe_route, traditional: data.traditional_route })
       setStatus('success')
     } catch (requestError) {
       setError(requestError.message)
@@ -186,7 +204,7 @@ function App() {
     setRoutePreference(preference)
     setForm((currentForm) => ({
       ...currentForm,
-      safetyWeight: preference === 'safe' ? 7 : 0,
+      safetyWeight: preference === 'safe' ? 0.7 : 0,
     }))
   }
 
@@ -271,53 +289,70 @@ function App() {
     <main className={`app-shell ${isSidebarOpen ? 'sidebar-open' : 'sidebar-collapsed'}`}>
       <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen((current) => !current)} />
 
-      <section className="content">
-        <RoutePanel
-          form={form}
-          originQuery={originQuery}
-          destinationQuery={destinationQuery}
-          selectionMode={selectionMode}
-          geoLoading={geoLoading}
-          geoStatus={geoStatus}
-          travelDate={travelDate}
-          travelTime={travelTime}
-          useCurrentTime={useCurrentTime}
-          routePreference={routePreference}
-          status={status}
-          error={error}
-          effectiveTurno={effectiveTurno}
-          onOriginQueryChange={setOriginQuery}
-          onDestinationQueryChange={setDestinationQuery}
-          onSelectionModeChange={setSelectionMode}
-          onPreferenceChange={handlePreferenceChange}
-          onTravelDateChange={setTravelDate}
-          onTravelTimeChange={setTravelTime}
-          onUpdateField={updateField}
-          onToggleCurrentTime={toggleCurrentTime}
-          onGeocode={handleGeocode}
-          onSubmit={handleSubmit}
-        />
-
-        <MapView
-          mapCenter={mapCenter}
-          selectionMode={selectionMode}
-          onPick={handlePickFromMap}
-          origin={origin}
-          destination={destination}
-          riskZones={riskZones}
-          crimePoints={crimePoints}
-          safeRoutePositions={safeRoutePositions}
-          traditionalRoutePositions={traditionalRoutePositions}
-        />
-      </section>
-
-      <InfoPanel
-        safeRoute={safeRoute}
-        traditionalRoute={traditionalRoute}
-        safeMinutes={safeMinutes}
-        traditionalMinutes={traditionalMinutes}
-        riskReduction={riskReduction}
+      <RoutePanel
+        form={form}
+        originQuery={originQuery}
+        destinationQuery={destinationQuery}
+        selectionMode={selectionMode}
+        geoLoading={geoLoading}
+        geoStatus={geoStatus}
+        travelDate={travelDate}
+        travelTime={travelTime}
+        useCurrentTime={useCurrentTime}
+        routePreference={routePreference}
+        status={status}
+        error={error}
+        effectiveTurno={effectiveTurno}
+        onOriginQueryChange={setOriginQuery}
+        onDestinationQueryChange={setDestinationQuery}
+        onSelectionModeChange={setSelectionMode}
+        onPreferenceChange={handlePreferenceChange}
+        onTravelDateChange={setTravelDate}
+        onTravelTimeChange={setTravelTime}
+        onUpdateField={updateField}
+        onToggleCurrentTime={toggleCurrentTime}
+        onGeocode={handleGeocode}
+        onSubmit={handleSubmit}
       />
+
+      <section className="map-column">
+        <div className="map-stage">
+          <MapView
+            mapCenter={mapCenter}
+            selectionMode={selectionMode}
+            onPick={handlePickFromMap}
+            origin={origin}
+            destination={destination}
+            riskZones={riskZones}
+            heatmapPoints={heatmapPoints}
+            safeRoutePositions={safeRoutePositions}
+            traditionalRoutePositions={traditionalRoutePositions}
+          />
+          <div
+            className={`map-overlay ${isResultsMinimized ? 'is-minimized' : ''}`}
+            aria-live="polite"
+          >
+            <button
+              type="button"
+              className="map-overlay-toggle"
+              onClick={() => setIsResultsMinimized((current) => !current)}
+              aria-label={isResultsMinimized ? 'Mostrar resultados' : 'Minimizar resultados'}
+            >
+              {isResultsMinimized ? '+' : '-'}
+            </button>
+            {!isResultsMinimized && (
+              <InfoPanel
+                safeRoute={safeRoute}
+                traditionalRoute={traditionalRoute}
+                safeMinutes={safeMinutes}
+                traditionalMinutes={traditionalMinutes}
+                riskReduction={riskReduction}
+              />
+            )}
+          </div>
+        </div>
+        <BottomMetrics stats={systemStats} />
+      </section>
     </main>
   )
 }

@@ -1,3 +1,5 @@
+import { Calendar, Clock, Shield, Timer, X } from 'lucide-react'
+
 function RoutePanel({
   form,
   originQuery,
@@ -23,104 +25,118 @@ function RoutePanel({
   onGeocode,
   onSubmit,
 }) {
+  const alphaValue = Number(form.safetyWeight || 0).toFixed(2)
+
   return (
-    <div className="route-panel">
-      <header>
-        <p>Nueva ruta</p>
+    <aside className="route-panel">
+      <header className="panel-header">
+        <p className="panel-title">Nueva ruta</p>
         <h2>Planifica tu viaje</h2>
       </header>
       <form onSubmit={onSubmit} className="route-form">
-        <fieldset>
-          <legend>Punto de origen</legend>
-          <label className="location-input">
-            <span className="dot dot--green"></span>
+        <div className="input-group">
+          <span className="input-label">Punto de origen</span>
+          <div className="input-field">
+            <span className="dot dot--green" />
             <input
               name="originQuery"
               value={originQuery}
               onChange={(event) => onOriginQueryChange(event.target.value)}
-              placeholder="Buscar punto de origen"
+              placeholder="Av. Arequipa 1234, Lima"
             />
             <button
               type="button"
-              onClick={() => onGeocode('origin')}
-              disabled={geoLoading.origin}
+              className="icon-button"
+              onClick={() => onOriginQueryChange('')}
+              aria-label="Limpiar origen"
             >
-              {geoLoading.origin ? '...' : 'Buscar'}
+              <X size={14} />
             </button>
-          </label>
-          <div className="action-row wide-field">
+          </div>
+          <div className="input-actions">
             <button
               type="button"
-              className={
-                selectionMode === 'origin'
-                  ? 'action-button action-button--active'
-                  : 'action-button'
-              }
+              className={selectionMode === 'origin' ? 'ghost-button is-active' : 'ghost-button'}
               onClick={() =>
                 onSelectionModeChange((current) => (current === 'origin' ? null : 'origin'))
               }
             >
               {selectionMode === 'origin' ? 'Seleccionando...' : 'Elegir en mapa'}
             </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => onGeocode('origin')}
+              disabled={geoLoading.origin}
+            >
+              {geoLoading.origin ? '...' : 'Buscar'}
+            </button>
           </div>
-          {geoStatus.origin && <p className="geo-status wide-field">{geoStatus.origin}</p>}
-        </fieldset>
+          {geoStatus.origin && <p className="inline-status">{geoStatus.origin}</p>}
+        </div>
 
-        <fieldset>
-          <legend>Punto de destino</legend>
-          <label className="location-input">
-            <span className="dot dot--red"></span>
+        <div className="input-group">
+          <span className="input-label">Punto de destino</span>
+          <div className="input-field">
+            <span className="dot dot--red" />
             <input
               name="destinationQuery"
               value={destinationQuery}
               onChange={(event) => onDestinationQueryChange(event.target.value)}
-              placeholder="Buscar punto de destino"
+              placeholder="Universidad de Lima"
             />
             <button
               type="button"
-              onClick={() => onGeocode('destination')}
-              disabled={geoLoading.destination}
+              className="icon-button"
+              onClick={() => onDestinationQueryChange('')}
+              aria-label="Limpiar destino"
             >
-              {geoLoading.destination ? '...' : 'Buscar'}
+              <X size={14} />
             </button>
-          </label>
-          <div className="action-row wide-field">
+          </div>
+          <div className="input-actions">
             <button
               type="button"
-              className={
-                selectionMode === 'destination'
-                  ? 'action-button action-button--active'
-                  : 'action-button'
-              }
+              className={selectionMode === 'destination' ? 'ghost-button is-active' : 'ghost-button'}
               onClick={() =>
                 onSelectionModeChange((current) =>
                   current === 'destination' ? null : 'destination',
                 )
               }
             >
-              {selectionMode === 'destination'
-                ? 'Seleccionando...'
-                : 'Elegir en mapa'}
+              {selectionMode === 'destination' ? 'Seleccionando...' : 'Elegir en mapa'}
+            </button>
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => onGeocode('destination')}
+              disabled={geoLoading.destination}
+            >
+              {geoLoading.destination ? '...' : 'Buscar'}
             </button>
           </div>
-          {geoStatus.destination && (
-            <p className="geo-status wide-field">{geoStatus.destination}</p>
-          )}
-        </fieldset>
+          {geoStatus.destination && <p className="inline-status">{geoStatus.destination}</p>}
+        </div>
 
-        <div className="two-columns">
-          <label>
-            Fecha
-            <input type="date" value={travelDate} onChange={(event) => onTravelDateChange(event.target.value)} />
+        <div className="date-time-row">
+          <label className="input-stack">
+            <span>Fecha</span>
+            <div className="input-field">
+              <Calendar size={14} />
+              <input type="date" value={travelDate} onChange={(event) => onTravelDateChange(event.target.value)} />
+            </div>
           </label>
-          <label>
-            Hora
-            <input type="time" value={travelTime} onChange={(event) => onTravelTimeChange(event.target.value)} />
+          <label className="input-stack">
+            <span>Hora</span>
+            <div className="input-field">
+              <Timer size={14} />
+              <input type="time" value={travelTime} onChange={(event) => onTravelTimeChange(event.target.value)} />
+            </div>
           </label>
         </div>
 
-        <label>
-          Turno
+        <label className="input-stack">
+          <span>Turno</span>
           <select
             name="turno"
             value={effectiveTurno}
@@ -151,30 +167,37 @@ function RoutePanel({
               className={routePreference === 'safe' ? 'chip chip--active' : 'chip'}
               onClick={() => onPreferenceChange('safe')}
             >
-              Ruta más segura
+              <Shield size={14} /> Ruta más segura
             </button>
             <button
               type="button"
               className={routePreference === 'fast' ? 'chip chip--active' : 'chip'}
               onClick={() => onPreferenceChange('fast')}
             >
-              Ruta más rápida
+              <Clock size={14} /> Ruta más rápida
             </button>
           </div>
         </div>
 
-        <label>
-          Peso de seguridad (α): {form.safetyWeight}
+        <div className="slider-block">
+          <div className="slider-header">
+            <span>Peso de seguridad (α)</span>
+            <span className="alpha-badge">{alphaValue}</span>
+          </div>
           <input
             type="range"
             name="safetyWeight"
             min="0"
-            max="10"
-            step="1"
+            max="1"
+            step="0.05"
             value={form.safetyWeight}
             onChange={onUpdateField}
           />
-        </label>
+          <div className="slider-labels">
+            <span>Priorizar rapidez</span>
+            <span>Priorizar seguridad</span>
+          </div>
+        </div>
 
         {selectionMode && (
           <p className="selection-hint">
@@ -183,12 +206,25 @@ function RoutePanel({
           </p>
         )}
 
-        <button type="submit" disabled={status === 'loading'}>
+        <button type="submit" className="primary-button" disabled={status === 'loading'}>
+          <Shield size={16} />
           {status === 'loading' ? 'Calculando...' : 'Buscar ruta segura'}
         </button>
       </form>
+      <div className="risk-legend">
+        <h4>Niveles de riesgo</h4>
+        <div>
+          <span className="risk-dot risk-high" /> Alto riesgo 0.7–1.0
+        </div>
+        <div>
+          <span className="risk-dot risk-medium" /> Medio riesgo 0.3–0.7
+        </div>
+        <div>
+          <span className="risk-dot risk-low" /> Bajo riesgo 0.0–0.3
+        </div>
+      </div>
       {error && <p className="error-message">{error}</p>}
-    </div>
+    </aside>
   )
 }
 

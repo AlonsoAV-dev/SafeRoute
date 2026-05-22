@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections import Counter
 from dataclasses import dataclass
-from math import radians, sin, cos, sqrt, atan2
+from math import radians, sin, cos, sqrt, atan2, floor
 
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 
@@ -46,15 +46,22 @@ def level_from_score(score: float) -> str:
 
 
 class RiskModel:
-    def __init__(self, records: list[CrimeRecord], clusters: int = 4):
+    def __init__(self, records: list[CrimeRecord], clusters: int | None = None, grid_size_m: int = 100):
         if len(records) < 3:
             raise ValueError("Se necesitan al menos 3 registros delictivos validos.")
 
         self.records = records
         self.turno_encoder = LabelEncoder()
-        self.cluster_count = min(clusters, len(records))
+        if clusters is None:
+            clusters = max(6, min(24, int(len(records) ** 0.5)))
+        self.cluster_count = min(int(clusters), len(records))
+        self.grid_size_m = max(40, int(grid_size_m))
+        self._lat0 = sum(record.lat for record in records) / len(records)
+        self._lat_m_per_deg = 111_320.0
+        self._lng_m_per_deg = 111_320.0 * cos(radians(self._lat0))
         self.kmeans = KMeans(n_clusters=self.cluster_count, random_state=42, n_init=10)
         self.random_forest = RandomForestClassifier(n_estimators=80, random_state=42, max_depth=5)
+        self.model_accuracy = 0.0
         self._fit()
 
     def _fit(self) -> None:
@@ -78,6 +85,9 @@ class RiskModel:
             labels.append(level_from_score(score))
 
         self.random_forest.fit(features, labels)
+        predictions = self.random_forest.predict(features)
+        correct = sum(1 for expected, predicted in zip(labels, predictions) if expected == predicted)
+        self.model_accuracy = correct / max(len(labels), 1)
 
     def predict_point(self, lat: float, lng: float, turno: str) -> RiskPrediction:
         normalized_turno = normalize_turno(turno)
@@ -92,32 +102,51 @@ class RiskModel:
 
     def get_zones(self, turno: str) -> list[dict]:
         normalized_turno = normalize_turno(turno)
-        zones = []
-        for cluster, center in enumerate(self.kmeans.cluster_centers_):
-            cluster_records = [
-                record
-                for record, assigned_cluster in zip(self.records, self.record_clusters)
-                if int(assigned_cluster) == cluster
-            ]
-            if not cluster_records:
-                continue
+        cells = self._grid_cells(normalized_turno)
+        if not cells:
+            return []
 
-            radius = max(
-                haversine_m(center[0], center[1], record.lat, record.lng)
-                for record in cluster_records
-            )
-            score = min(1.0, self.cluster_base_risk.get(cluster, 0.0) * 0.78 + TURNO_RISK[normalized_turno])
+        max_total = max(cell["total"] for cell in cells)
+        zones = []
+        radius_m = max(40.0, self.grid_size_m * 0.55)
+        for index, cell in enumerate(cells):
+            score = min(1.0, (cell["total"] / max_total) * 0.78 + TURNO_RISK[normalized_turno])
             zones.append(
                 {
-                    "cluster": cluster,
-                    "center": {"lat": round(float(center[0]), 6), "lng": round(float(center[1]), 6)},
-                    "radius_m": round(max(radius, 450), 1),
+                    "cluster": index,
+                    "center": {
+                        "lat": round(cell["center"][0], 6),
+                        "lng": round(cell["center"][1], 6),
+                    },
+                    "radius_m": round(radius_m, 1),
                     "risk_score": round(score, 3),
                     "risk_level": level_from_score(score),
-                    "total_crimes": len(cluster_records),
+                    "total_crimes": cell["total"],
                 }
             )
+
         return sorted(zones, key=lambda zone: zone["risk_score"], reverse=True)
+
+    def get_heatmap_points(self, turno: str) -> list[list[float]]:
+        normalized_turno = normalize_turno(turno)
+        cells = self._grid_cells(normalized_turno)
+        if not cells:
+            return []
+
+        max_total = max(cell["total"] for cell in cells)
+        points = []
+        for cell in cells:
+            intensity = (cell["total"] / max_total) ** 0.75
+            points.append([
+                round(cell["center"][0], 6),
+                round(cell["center"][1], 6),
+                round(min(1.0, intensity), 3),
+            ])
+        return points
+
+    def get_zone_count(self, turno: str) -> int:
+        normalized_turno = normalize_turno(turno)
+        return len(self._grid_cells(normalized_turno))
 
     def get_crime_points(self, turno: str | None = None) -> list[dict]:
         normalized_turno = normalize_turno(turno) if turno else None
@@ -163,3 +192,27 @@ class RiskModel:
         if turno in self.turno_encoder.classes_:
             return int(self.turno_encoder.transform([turno])[0])
         return int(self.turno_encoder.transform(["noche"])[0])
+
+    def _grid_cell(self, lat: float, lng: float) -> tuple[str, tuple[float, float]]:
+        x_m = lng * self._lng_m_per_deg
+        y_m = lat * self._lat_m_per_deg
+        grid_x = floor(x_m / self.grid_size_m)
+        grid_y = floor(y_m / self.grid_size_m)
+        center_x = (grid_x + 0.5) * self.grid_size_m
+        center_y = (grid_y + 0.5) * self.grid_size_m
+        center_lat = center_y / self._lat_m_per_deg
+        center_lng = center_x / self._lng_m_per_deg
+        return f"{grid_x}:{grid_y}", (center_lat, center_lng)
+
+    def _grid_cells(self, turno: str) -> list[dict]:
+        cells: dict[str, dict] = {}
+        for record in self.records:
+            if record.turno != turno:
+                continue
+            cell_id, center = self._grid_cell(record.lat, record.lng)
+            cell = cells.get(cell_id)
+            if not cell:
+                cells[cell_id] = {"center": center, "total": 1}
+            else:
+                cell["total"] += 1
+        return list(cells.values())

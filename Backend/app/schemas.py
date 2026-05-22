@@ -39,3 +39,41 @@ class RouteResponse(BaseModel):
     risk_level: str
     turno: str
     zones_considered: list[RiskZone]
+
+
+class ApiRouteRequest(BaseModel):
+    origin: tuple[float, float]
+    destination: tuple[float, float]
+    alpha: float = Field(default=0.7, ge=0.0, le=1.0)
+    datetime: str | None = None
+
+
+class ApiRouteMetrics(BaseModel):
+    alpha: float
+    calc_time_ms: float
+
+
+class ApiRouteResponse(BaseModel):
+    safe_route: RouteResponse
+    traditional_route: RouteResponse
+    metrics: ApiRouteMetrics
+
+
+class ApiHeatmapResponse(BaseModel):
+    points: list[list[float]]
+
+
+class ApiRiskZone(BaseModel):
+    center: tuple[float, float]
+    radius: float
+    risk_level: str
+
+
+class ApiRiskZonesResponse(BaseModel):
+    zones: list[ApiRiskZone]
+
+
+class ApiStatsResponse(BaseModel):
+    model_accuracy: float
+    zones_count: int
+    calc_time_ms: float

@@ -1,10 +1,15 @@
+import { ChevronRight, Shield } from 'lucide-react'
+
 function InfoPanel({ safeRoute, traditionalRoute, safeMinutes, traditionalMinutes, riskReduction }) {
   return (
     <aside className="info-panel">
       <div className="panel-card">
-        <h3>Ruta recomendada</h3>
+        <div className="panel-card-header">
+          <Shield size={16} />
+          <h3>Ruta recomendada</h3>
+        </div>
         {safeRoute ? (
-          <div className="panel-stats">
+          <div className="panel-stats grid">
             <div>
               <span>Distancia</span>
               <strong>{safeRoute.distance_km} km</strong>
@@ -23,11 +28,13 @@ function InfoPanel({ safeRoute, traditionalRoute, safeMinutes, traditionalMinute
         ) : (
           <p className="muted">Genera una ruta para ver resultados.</p>
         )}
+        <div className="route-line safe" />
       </div>
+
       <div className="panel-card">
         <h3>Ruta tradicional</h3>
         {traditionalRoute ? (
-          <div className="panel-stats">
+          <div className="panel-stats grid">
             <div>
               <span>Distancia</span>
               <strong>{traditionalRoute.distance_km} km</strong>
@@ -46,12 +53,24 @@ function InfoPanel({ safeRoute, traditionalRoute, safeMinutes, traditionalMinute
         ) : (
           <p className="muted">Sin datos todavía.</p>
         )}
+        <div className="route-line traditional" />
       </div>
+
       <div className="panel-card highlight">
-        <h3>Reducción de riesgo</h3>
-        <strong>{riskReduction !== null ? `${riskReduction}%` : '--'}</strong>
+        <div className="panel-card-header">
+          <Shield size={18} />
+          <h3>Reducción de riesgo</h3>
+        </div>
+        <strong className="risk-reduction">
+          {riskReduction !== null ? `${riskReduction}%` : '--'}
+        </strong>
         <p>Comparado con la ruta tradicional</p>
       </div>
+
+      <button type="button" className="outline-button">
+        Ver indicaciones paso a paso
+        <ChevronRight size={16} />
+      </button>
     </aside>
   )
 }
