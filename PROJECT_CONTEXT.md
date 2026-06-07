@@ -22,7 +22,14 @@ El proyecto esta orientado a una tesis universitaria, por lo que el enfoque debe
 
 ```powershell
 \.venv\Scripts\python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --app-dir .\Backend
+
+o
+
+python.exe -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --app-dir .\Backend
+
+
 ```
+
 
 ## Objetivo
 

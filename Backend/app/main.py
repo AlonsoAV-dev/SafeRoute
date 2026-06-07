@@ -20,7 +20,7 @@ from app.schemas import (
 )
 from app.services.preprocessing import load_crime_records
 from app.services.risk_model import RiskModel
-from app.services.routing import generate_safe_route
+from app.services.routing import generate_route_comparison, generate_safe_route
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -31,10 +31,15 @@ DATASET_PATH = next(
     (path for path in (REAL_DATASET_PATH, LEGACY_DATASET_PATH, SAMPLE_DATASET_PATH) if path.exists()),
     REAL_DATASET_PATH,
 )
+PROCESSED_MODEL_DIR = BASE_DIR / "data" / "procesados"
 
 records = load_crime_records(DATASET_PATH)
 RISK_GRID_SIZE_M = int(os.getenv("RISK_GRID_SIZE_M", "100"))
-risk_model = RiskModel(records, grid_size_m=RISK_GRID_SIZE_M)
+risk_model = RiskModel(
+    records,
+    grid_size_m=RISK_GRID_SIZE_M,
+    model_dir=PROCESSED_MODEL_DIR,
+)
 
 app = FastAPI(
     title="SafeRoute API",
@@ -72,7 +77,12 @@ def _turno_from_datetime(value: str | None) -> str:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "records": len(records), "dataset": DATASET_PATH.name}
+    return {
+        "status": "ok",
+        "records": len(records),
+        "dataset": DATASET_PATH.name,
+        "risk_model": risk_model.model_name,
+    }
 
 
 @app.get("/risk-zones", response_model=list[RiskZone])
@@ -81,8 +91,28 @@ def risk_zones(turno: str = "noche") -> list[dict]:
 
 
 @app.get("/crime-points", response_model=list[CrimePoint])
-def crime_points(turno: str | None = None) -> list[dict]:
-    return risk_model.get_crime_points(turno)
+def crime_points(
+    turno: str | None = None,
+    tipo: str | None = None,
+    modalidad: str | None = None,
+    dia_semana: str | None = None,
+) -> list[dict]:
+    points = risk_model.get_crime_points(turno, tipo, modalidad, dia_semana)
+    return [
+        {
+            "id": point["id"],
+            "location": {"lat": point["lat"], "lng": point["lng"]},
+            "cluster": point["cluster"],
+            "turno": point["turno"],
+            "tipo": point["tipo"],
+            "subtipo": point["subtipo"],
+            "modalidad": point["modalidad"],
+            "peso_delito": point["peso_delito"],
+            "distrito": point["distrito"],
+            "dia_semana": point["dia_semana"],
+        }
+        for point in points
+    ]
 
 
 @app.post("/route", response_model=RouteResponse)
@@ -104,35 +134,32 @@ def route(request: RouteRequest) -> dict:
     }
 
 
-@app.post("/api/route/calculate", response_model=ApiRouteResponse)
+@app.post("/api/route/calculate")
 def api_route_calculate(request: ApiRouteRequest) -> dict:
     start = perf_counter()
-    turno = _turno_from_datetime(request.datetime)
     try:
-        safe_route = generate_safe_route(
+        comparison = generate_route_comparison(
             origin=(request.origin[0], request.origin[1]),
             destination=(request.destination[0], request.destination[1]),
-            turno=turno,
             risk_model=risk_model,
-            safety_weight=0.0,
-            alpha=request.alpha,
-        )
-        traditional_route = generate_safe_route(
-            origin=(request.origin[0], request.origin[1]),
-            destination=(request.destination[0], request.destination[1]),
-            turno=turno,
-            risk_model=risk_model,
-            safety_weight=0.0,
-            alpha=0.0,
+            modelo_riesgo=request.modelo_riesgo,
+            beta=request.beta,
+            buffer_m=request.buffer_m,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
     elapsed_ms = (perf_counter() - start) * 1000
-    zones = risk_model.get_zones(turno)
     return {
-        "safe_route": {**safe_route, "turno": turno, "zones_considered": zones},
-        "traditional_route": {**traditional_route, "turno": turno, "zones_considered": zones},
-        "metrics": {"alpha": request.alpha, "calc_time_ms": round(elapsed_ms, 2)},
+        **comparison,
+        "route_preference": request.routePreference,
+        "recommended_route": (
+            "safe_route" if request.routePreference == "safe" else "traditional_route"
+        ),
+        "metrics": {
+            "alpha": 1,
+            "beta": comparison["parametros_a_star"]["beta_ruta_segura"],
+            "calc_time_ms": round(elapsed_ms, 2),
+        },
     }
 
 
@@ -145,6 +172,9 @@ def api_risk_zones(turno: str = "noche") -> dict:
                 "center": (zone["center"]["lat"], zone["center"]["lng"]),
                 "radius": zone["radius_m"],
                 "risk_level": zone["risk_level"],
+                "risk_score": zone["risk_score"],
+                "total_crimes": zone["total_crimes"],
+                "avg_crime_weight": zone["avg_crime_weight"],
             }
             for zone in zones
         ]
@@ -152,14 +182,37 @@ def api_risk_zones(turno: str = "noche") -> dict:
 
 
 @app.get("/api/heatmap", response_model=ApiHeatmapResponse)
-def api_heatmap(turno: str = "noche") -> dict:
-    return {"points": risk_model.get_heatmap_points(turno)}
+def api_heatmap(
+    turno: str | None = None,
+    tipo: str | None = None,
+    modalidad: str | None = None,
+    dia_semana: str | None = None,
+) -> dict:
+    return {
+        "points": risk_model.get_heatmap_points(turno, tipo, modalidad, dia_semana)
+    }
+
+
+@app.get("/api/crime-points")
+def api_crime_points(
+    turno: str | None = None,
+    tipo: str | None = None,
+    modalidad: str | None = None,
+    dia_semana: str | None = None,
+) -> dict:
+    points = risk_model.get_crime_points(turno, tipo, modalidad, dia_semana)
+    return {"points": points, "total": len(points)}
+
+
+@app.get("/api/crime-filters")
+def api_crime_filters() -> dict:
+    return risk_model.get_filter_options()
 
 
 @app.get("/api/stats", response_model=ApiStatsResponse)
 def api_stats() -> dict:
     return {
         "model_accuracy": round(risk_model.model_accuracy, 3),
-        "zones_count": risk_model.get_zone_count("noche"),
+        "zones_count": risk_model.get_zone_count(),
         "calc_time_ms": 0.0,
     }

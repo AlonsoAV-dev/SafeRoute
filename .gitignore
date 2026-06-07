@@ -29,3 +29,5 @@ Backend/cache/
 # Experiment outputs
 Backend/experiments/outputs/
 Backend/experiments/*.csv
+Backend/data/procesados/
+Backend/data/procesados_prueba/
