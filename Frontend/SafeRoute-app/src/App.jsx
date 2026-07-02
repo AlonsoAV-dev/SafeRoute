@@ -40,16 +40,19 @@ function App() {
   const [destinationQuery, setDestinationQuery] = useState('')
   const [routeData, setRouteData] = useState({ safe: null, traditional: null })
   const [routeMeta, setRouteMeta] = useState(null)
-  const [riskZones, setRiskZones] = useState([])
   const [heatmapPoints, setHeatmapPoints] = useState([])
   const [crimePoints, setCrimePoints] = useState([])
+  const [predictionHeatmapPoints, setPredictionHeatmapPoints] = useState([])
+  const [predictionPoints, setPredictionPoints] = useState([])
   const [crimeTotal, setCrimeTotal] = useState(0)
+  const [predictionTotal, setPredictionTotal] = useState(0)
   const [filterOptions, setFilterOptions] = useState(DEFAULT_FILTER_OPTIONS)
   const [crimeFilters, setCrimeFilters] = useState(DEFAULT_FILTERS)
   const [mapLayers, setMapLayers] = useState({
     crimes: false,
-    heatmap: true,
-    zones: true,
+    heatmap: false,
+    predictionHeatmap: true,
+    predictionPoints: false,
   })
   const [mapDataLoading, setMapDataLoading] = useState(false)
   const [status, setStatus] = useState('idle')
@@ -59,7 +62,7 @@ function App() {
   const [geoLoading, setGeoLoading] = useState({ origin: false, destination: false })
   const [mapCenter, setMapCenter] = useState(LIMA_METRO_CENTER)
   const [routePreference, setRoutePreference] = useState('safe')
-  const [riskModelSelection, setRiskModelSelection] = useState('auto')
+  const [riskMode, setRiskMode] = useState('predicted')
   const [isResultsMinimized, setIsResultsMinimized] = useState(false)
 
   const safeRoute = routeData.safe
@@ -117,14 +120,15 @@ function App() {
       setMapDataLoading(true)
       try {
         const requests = [
-          fetch(`${API_URL}/risk-zones`),
           mapLayers.heatmap ? fetch(`${API_URL}/heatmap${suffix}`) : null,
           mapLayers.crimes ? fetch(`${API_URL}/crime-points${suffix}`) : null,
+          mapLayers.predictionHeatmap ? fetch(`${API_URL}/prediction-heatmap`) : null,
+          mapLayers.predictionPoints
+            ? fetch(`${API_URL}/prediction-points?min_score=0.34&limit=15000`)
+            : null,
         ]
-        const [zonesResponse, heatmapResponse, crimesResponse] = await Promise.all(requests)
-        if (!zonesResponse.ok) throw new Error('No se pudieron cargar las zonas de riesgo.')
-        const zonesData = await zonesResponse.json()
-        setRiskZones(zonesData.zones ?? [])
+        const [heatmapResponse, crimesResponse, predictionHeatmapResponse, predictionPointsResponse] =
+          await Promise.all(requests)
 
         if (heatmapResponse) {
           if (!heatmapResponse.ok) throw new Error('No se pudo cargar el mapa de calor.')
@@ -143,6 +147,24 @@ function App() {
           setCrimePoints([])
           setCrimeTotal(0)
         }
+
+        if (predictionHeatmapResponse) {
+          if (!predictionHeatmapResponse.ok) throw new Error('No se pudo cargar el calor RF.')
+          const predictionHeatmapData = await predictionHeatmapResponse.json()
+          setPredictionHeatmapPoints(predictionHeatmapData.points ?? [])
+        } else {
+          setPredictionHeatmapPoints([])
+        }
+
+        if (predictionPointsResponse) {
+          if (!predictionPointsResponse.ok) throw new Error('No se pudieron cargar los tramos RF.')
+          const predictionData = await predictionPointsResponse.json()
+          setPredictionPoints(predictionData.points ?? [])
+          setPredictionTotal(predictionData.total ?? 0)
+        } else {
+          setPredictionPoints([])
+          setPredictionTotal(0)
+        }
       } catch (requestError) {
         setError(requestError.message)
       } finally {
@@ -150,7 +172,13 @@ function App() {
       }
     }
     loadMapData()
-  }, [crimeFilters, mapLayers.crimes, mapLayers.heatmap])
+  }, [
+    crimeFilters,
+    mapLayers.crimes,
+    mapLayers.heatmap,
+    mapLayers.predictionHeatmap,
+    mapLayers.predictionPoints,
+  ])
 
   async function handleSubmit(event) {
     event.preventDefault()
@@ -172,9 +200,10 @@ function App() {
           alpha: Number(form.safetyWeight),
           datetime: new Date().toISOString().slice(0, 16),
           routePreference,
-          modelo_riesgo: riskModelSelection,
+          modelo_riesgo: 'random_forest',
           beta: 10,
-          buffer_m: 100,
+          buffer_m: 200,
+          risk_mode: riskMode,
         }),
       })
       if (!response.ok) {
@@ -301,7 +330,7 @@ function App() {
         geoLoading={geoLoading}
         geoStatus={geoStatus}
         routePreference={routePreference}
-        riskModelSelection={riskModelSelection}
+        riskMode={riskMode}
         status={status}
         error={error}
         onOriginQueryChange={setOriginQuery}
@@ -309,7 +338,7 @@ function App() {
         onClearLocation={handleClearLocation}
         onSelectionModeChange={setSelectionMode}
         onPreferenceChange={handlePreferenceChange}
-        onRiskModelChange={setRiskModelSelection}
+        onRiskModeChange={setRiskMode}
         onGeocode={handleGeocode}
         onSubmit={handleSubmit}
       />
@@ -322,10 +351,12 @@ function App() {
             onPick={handlePickFromMap}
             origin={origin}
             destination={destination}
-            riskZones={mapLayers.zones ? riskZones : []}
             heatmapPoints={heatmapPoints}
             crimePoints={crimePoints}
+            predictionHeatmapPoints={predictionHeatmapPoints}
+            predictionPoints={predictionPoints}
             crimeTotal={crimeTotal}
+            predictionTotal={predictionTotal}
             crimeFilters={crimeFilters}
             filterOptions={filterOptions}
             mapLayers={mapLayers}
@@ -338,7 +369,7 @@ function App() {
             }
             onResetFilters={() => setCrimeFilters(DEFAULT_FILTERS)}
             safeRoutePositions={safeRoutePositions}
-            traditionalRoutePositions={traditionalRoutePositions}
+            traditionalRoutePositions={routeMeta?.misma_ruta ? [] : traditionalRoutePositions}
           />
           <div className={`map-overlay ${isResultsMinimized ? 'is-minimized' : ''}`}>
             <button

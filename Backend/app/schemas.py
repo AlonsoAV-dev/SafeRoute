@@ -15,20 +15,9 @@ class RouteRequest(BaseModel):
     safety_weight: float = Field(default=4.0, ge=0.0, le=10.0)
 
 
-class RiskZone(BaseModel):
-    cluster: int
-    center: Coordinate
-    radius_m: float
-    risk_score: float
-    risk_level: str
-    total_crimes: int
-    avg_crime_weight: float = 0.0
-
-
 class CrimePoint(BaseModel):
     id: int
     location: Coordinate
-    cluster: int
     turno: str
     tipo: str
     subtipo: str
@@ -44,7 +33,7 @@ class RouteResponse(BaseModel):
     risk_score: float
     risk_level: str
     turno: str
-    zones_considered: list[RiskZone]
+    zones_considered: list[dict]
 
 
 class ApiRouteRequest(BaseModel):
@@ -53,9 +42,10 @@ class ApiRouteRequest(BaseModel):
     alpha: float = Field(default=0.7, ge=0.0, le=1.0)
     datetime: str | None = None
     routePreference: Literal["safe", "fast"] = "safe"
-    modelo_riesgo: Literal["auto", "random_forest", "xgboost"] = "auto"
+    modelo_riesgo: Literal["random_forest"] = "random_forest"
     beta: float = Field(default=10.0, ge=0.0, le=20.0)
-    buffer_m: Literal[50, 100, 150] = 100
+    buffer_m: Literal[50, 100, 150, 200] = 200
+    risk_mode: Literal["predicted", "historical", "hybrid"] = "predicted"
 
 
 class ApiRouteMetrics(BaseModel):
@@ -73,20 +63,8 @@ class ApiHeatmapResponse(BaseModel):
     points: list[list[float]]
 
 
-class ApiRiskZone(BaseModel):
-    center: tuple[float, float]
-    radius: float
-    risk_level: str
-    risk_score: float
-    total_crimes: int
-    avg_crime_weight: float
-
-
-class ApiRiskZonesResponse(BaseModel):
-    zones: list[ApiRiskZone]
-
-
 class ApiStatsResponse(BaseModel):
     model_accuracy: float
-    zones_count: int
+    segments_count: int
+    prediction_period: str
     calc_time_ms: float

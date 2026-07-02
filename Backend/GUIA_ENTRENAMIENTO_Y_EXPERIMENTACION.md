@@ -1,200 +1,100 @@
-# Entrenamiento y experimentación
+# Guía de entrenamiento temporal
 
-## 1. Preparar el entorno
+## Fuente
 
-Desde la raíz del proyecto:
+El archivo esperado es `Backend/data/DELITOS TOTAL.csv`, con una fila por delito.
+Debe conservar el separador `;`, las columnas originales y `GlobalID` para eliminar
+duplicados.
 
-```powershell
-python -m pip install -r Backend/requirements.txt
-```
+## Unidad de análisis
 
-El archivo fuente esperado por defecto es:
+Random Forest no recibe delitos individuales. Recibe un panel donde:
 
 ```text
-Backend/data/AAV-DATASET.csv
+1 fila = 1 tramo vial OSM + 1 ventana histórica
 ```
 
-El archivo original se lee, pero nunca se sobrescribe.
+Con una ventana de tres meses:
 
-## 2. Entrenar modelos para la API
+| Variables históricas | Objetivo |
+|---|---|
+| enero-marzo | riesgo observado en abril |
+| febrero-abril | riesgo observado en mayo |
+| marzo-mayo | riesgo observado en junio |
 
-Ejecutar desde `Backend`:
+El último periodo se reserva para prueba. No se realiza una división aleatoria porque
+permitiría que el entrenamiento utilizara información temporal posterior.
 
-```powershell
-python -m app.flujo_entrenamiento.ejecutar
+Los nombres de meses en español o inglés se normalizan a un número y a un nombre en
+español. La fecha procesada se conserva en formato ISO `AAAA-MM-DD`.
+
+## Agregación espacial
+
+Cada tramo recibe la señal de los delitos ubicados dentro de un buffer alrededor de su
+geometría. Se comparan radios de 100, 150 y 200 metros. La gravedad disminuye mediante
+decaimiento gaussiano conforme aumenta la distancia entre el delito y el tramo.
+
+Un delito puede influir en varios tramos vecinos porque todos ellos están expuestos al
+entorno del hecho, pero solo se cuenta una vez dentro de cada tramo. Todos los tramos
+permanecen en el panel, incluidos los que no presentan delitos cercanos.
+
+El radio se selecciona únicamente con el periodo de prueba: mayor F1 macro y, en caso
+de empate, mayor recall y PR-AUC para riesgo Alto.
+
+## Variables
+
+Las 16 entradas se agrupan en ubicación y longitud del tramo; frecuencia, gravedad y
+delitos graves de la ventana histórica; conteos por tipo de delito; conteos por turno;
+y densidades de frecuencia y gravedad por 100 metros. No se usan identificadores,
+geometría, mes objetivo ni la variable objetivo como predictores.
+
+La variable continua futura es:
+
+```text
+riesgo_bruto_futuro = suma_pesos_mes_siguiente / max(longitud_m / 100, 1)
 ```
 
-Este comando:
+Los ceros forman la clase `bajo`. Los valores positivos se dividen entre `medio` y
+`alto` usando el percentil 75 calculado solo con el entrenamiento.
 
-1. Limpia y valida coordenadas, fechas y campos categóricos.
-2. Asigna `peso_delito` desde `modalidad`.
-3. Agrupa el historial en unidades espaciales de 200 metros.
-4. Calcula frecuencia y gravedad promedio.
-5. Calcula `riesgo_score`.
-6. Ejecuta K-Means.
-7. Divide una sola vez los mismos datos en train/test para ambos modelos.
-8. Entrena Random Forest y XGBoost con las mismas variables.
-9. Evalúa ambos modelos y selecciona el ganador.
-10. Guarda el modelo y las predicciones en `data/procesados`.
+## Score para A*
 
-Prueba rápida:
+Random Forest devuelve probabilidades de las tres clases:
 
-```powershell
-python -m app.flujo_entrenamiento.ejecutar --muestra 6000 --salida data/procesados_prueba
+```text
+riesgo_score = 0.0 * P(bajo) + 0.5 * P(medio) + 1.0 * P(alto)
 ```
 
-Cambiar el tamaño espacial:
+El costo de la ruta segura es:
 
-```powershell
-python -m app.flujo_entrenamiento.ejecutar --tamano-segmento-m 100
+```text
+costo_tramo = distancia_m * (1 + beta * riesgo_score)
 ```
 
-## 3. Ejecutar una experimentación sin reemplazar el modelo activo
+En producción, el modo predeterminado usa directamente el `riesgo_score` futuro de
+Random Forest. El sistema permite dos comparaciones opcionales: riesgo histórico del
+buffer de 200 metros y modo combinado (70% histórico + 30% Random Forest). El modo usado
+queda registrado en la respuesta de la ruta y ambos componentes se devuelven por tramo.
+
+## Ejecución
 
 Desde `Backend`:
 
 ```powershell
-python experiments/run_model_comparison.py
-```
-
-Cada corrida crea una carpeta fechada en:
-
-```text
-Backend/experiments/outputs/AAAAMMDD_HHMMSS
-```
-
-Ejemplo con muestra:
-
-```powershell
-python experiments/run_model_comparison.py --muestra 10000
-```
-
-Ejemplo para comparar otra resolución espacial:
-
-```powershell
-python experiments/run_model_comparison.py --tamano-segmento-m 100
-python experiments/run_model_comparison.py --tamano-segmento-m 300
-```
-
-## 4. Variables usadas por los modelos
-
-Variables numéricas:
-
-- latitud y longitud
-- frecuencia de delitos
-- suma y promedio de `peso_delito`
-- peso promedio y peso máximo
-- cantidad de delitos graves
-- cantidades históricas por turno
-- cluster K-Means
-
-Variable categórica:
-
-- distrito, codificado con One-Hot Encoding
-
-El día de la semana no se incluye en el score ni en las variables predictoras.
-Solo se conserva para filtros, gráficos y análisis exploratorio.
-
-## 5. Fórmula de riesgo
-
-```text
-riesgo_score =
-    0.30 * frecuencia_normalizada
-    + 0.70 * (peso_delito_promedio / 10)
-```
-
-La gravedad tiene mayor peso para permitir que una zona con pocos homicidios pueda
-ser más riesgosa que una zona con numerosos hurtos menores.
-
-La escala vigente de `peso_delito` es de 1 a 5.
-
-## 6. División y evaluación
-
-- Test: 25%
-- Train: 75%
-- Semilla: 42
-- División estratificada
-- Validación cruzada: 5 folds estratificados
-
-Métricas guardadas:
-
-- accuracy
-- precision macro
-- recall macro
-- F1 macro
-- recall de riesgo alto
-- matriz de confusión
-- F1 promedio y desviación en validación cruzada
-- accuracy train
-- brecha train-test
-
-Orden de selección:
-
-1. Mayor recall de riesgo alto.
-2. Mayor F1 macro.
-3. Mayor F1 macro de validación cruzada.
-4. Menor brecha train-test.
-
-## 7. Archivos clave para revisar
-
-- `metricas_modelos.csv`: comparación RF/XGBoost.
-- `modelo_ganador.json`: ganador y justificación.
-- `riesgo_por_tramo.csv`: frecuencia, gravedad y score por unidad espacial.
-- `clusters_riesgo.csv`: interpretación de clusters.
-- `predicciones_riesgo.csv`: riesgo predicho usado por la API.
-- `resumen_flujo.json`: resumen de la corrida.
-
-## 8. Activar el nuevo modelo
-
-Una experimentación fechada no reemplaza el modelo activo. Para activar un
-entrenamiento nuevo se debe ejecutar:
-
-```powershell
 python -m app.flujo_entrenamiento.ejecutar
 ```
 
-Después se reinicia FastAPI para que cargue `data/procesados`.
+Los meses que no llegan a su último día calendario se excluyen automáticamente. Con la
+fuente actual se usan los doce meses completos de 2025, diciembre se reserva para prueba
+y se generan predicciones para enero de 2026.
 
-## 9. Experimentar con A*, beta y buffers
+## Interpretación preliminar
 
-```powershell
-python experiments/run_beta_sweep.py `
-  --origin-lat -12.071 `
-  --origin-lng -77.068 `
-  --destination-lat -12.085 `
-  --destination-lng -77.035
-```
+La accuracy puede ser alta porque la mayoría de tramos no registra delitos. Para evaluar
+el modelo deben priorizarse `balanced_accuracy`, `f1_macro`, `recall_riesgo_alto` y
+`pr_auc_riesgo_alto`. Los resultados actuales validan el funcionamiento técnico; deben
+recalcularse cuando la serie incluya más meses.
 
-El experimento compara:
-
-- `beta`: 1, 3, 5, 10, 15 y 20.
-- buffer: 50, 100 y 150 metros.
-- modelo: automático, Random Forest y XGBoost.
-
-El costo rápido es:
-
-```text
-costo_rapido = distancia_m
-```
-
-El costo seguro es:
-
-```text
-costo_seguro = distancia_m * (1 + beta * riesgo_segmento_normalizado)
-```
-
-Cada arista recibe cantidad de delitos cercanos, peso acumulado, riesgo bruto,
-riesgo normalizado, tiempo y nivel de riesgo. La normalización aplica clipping
-con percentil 95 para evitar que pocos valores extremos dominen todos los costos.
-
-## 10. Advertencia metodológica
-
-La clase `nivel_riesgo` se construye a partir del `riesgo_score` calculado con
-frecuencia y gravedad. Por eso, una métrica muy alta significa que el modelo
-aprende correctamente ese criterio diseñado.
-
-No significa por sí sola que el modelo haya sido validado contra una etiqueta
-externa u oficial de peligrosidad. Para una validación más fuerte se necesitaría
-una variable objetivo independiente, por ejemplo incidentes futuros por tramo,
-evaluación policial o una ventana temporal posterior que no participe en el
-entrenamiento.
+Para evitar que millones de ceros dominen el ajuste, Random Forest conserva todos los
+ejemplos `medio/alto` y usa una muestra reproducible de la clase `bajo`. El mes de prueba
+no se submuestrea: las métricas se calculan sobre todos sus tramos.

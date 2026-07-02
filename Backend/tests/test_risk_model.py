@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from app.services.preprocessing import CrimeRecord
 from app.services.risk_model import RiskModel
@@ -33,7 +35,6 @@ class RiskModelTests(unittest.TestCase):
                 record(-12.041, -77.041, 5, "FEMINICIDIO"),
                 record(-12.042, -77.042, 5, "ROBO AGRAVADO"),
             ],
-            clusters=2,
             grid_size_m=100,
         )
 
@@ -47,6 +48,29 @@ class RiskModelTests(unittest.TestCase):
         morning = self.model.predict_point(-12.04, -77.04, "manana")
         night = self.model.predict_point(-12.04, -77.04, "noche")
         self.assertEqual(morning, night)
+
+    def test_model_exposes_no_cluster_zones(self):
+        self.assertEqual(self.model.get_segment_count(), 0)
+        self.assertEqual(self.model.resolve_model("auto"), "Random Forest")
+
+    def test_prediction_layers_expose_random_forest_segment_scores(self):
+        with TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            (model_dir / "predicciones_tramos.csv").write_text(
+                "tramo_id,latitud,longitud,riesgo_score,nivel_riesgo\n"
+                "OSM-1-2-10,-12.01,-77.01,0.82,alto\n"
+                "OSM-2-3-11,-12.02,-77.02,0.45,medio\n",
+                encoding="utf-8",
+            )
+            (model_dir / "metadata_modelo.json").write_text(
+                '{"periodo_prediccion": "2026-01"}', encoding="utf-8"
+            )
+            model = RiskModel(self.model.records, model_dir=model_dir)
+
+        points = model.get_prediction_points(min_score=0.34)
+        self.assertEqual([point["risk_score"] for point in points], [0.82, 0.45])
+        self.assertEqual(model.prediction_period, "2026-01")
+        self.assertTrue(model.get_prediction_heatmap_points())
 
 
 if __name__ == "__main__":

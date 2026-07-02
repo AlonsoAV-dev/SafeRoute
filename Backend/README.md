@@ -1,75 +1,78 @@
 # Backend SafeRoute
 
-API FastAPI para calcular rutas en Lima considerando distancia y riesgo delictivo.
+API FastAPI que predice el riesgo delictivo futuro por tramo vial y calcula rutas
+con OpenStreetMap y A*.
 
-## Estructura
+## Metodología activa
 
-- `app/main.py`: endpoints existentes y carga del modelo.
-- `app/services/preprocessing.py`: carga ligera usada por la API.
-- `app/services/risk_model.py`: predicción de riesgo en línea.
-- `app/services/routing.py`: grafo OSM, fallback local y A*.
-- `app/flujo_entrenamiento/limpieza.py`: carga, normalización y validación.
-- `app/flujo_entrenamiento/riesgo.py`: `riesgo_base`, recencia y riesgo espacial.
-- `app/flujo_entrenamiento/modelos.py`: K-Means, Random Forest y XGBoost.
-- `app/flujo_entrenamiento/ejecutar.py`: orquestación y persistencia.
+La unidad de análisis es `tramo OSM + ventana temporal`. El flujo:
 
-## Instalar
+1. Lee `data/DELITOS TOTAL.csv`.
+2. Limpia coordenadas, fechas, categorías y duplicados por `GlobalID`.
+3. Asigna pesos de gravedad entre 1 y 5.
+4. Agrega a cada tramo los delitos cercanos mediante buffers de 100, 150 y 200 metros.
+5. Excluye meses incompletos y crea ventanas históricas de tres meses con 16 variables.
+6. Entrena un Random Forest por radio y selecciona el de mayor F1 macro temporal.
+7. Convierte las probabilidades en `riesgo_score = 0.5 * P(medio) + P(alto)`.
+8. A* usa `distancia_m * (1 + beta * riesgo_score)`.
+
+La exposición acumulada de una ruta se calcula como la suma de
+`distancia_m * riesgo_score`; así no depende de cuántas aristas pequeñas contiene.
+
+Por defecto, el riesgo usado por A* es únicamente la predicción futura de Random Forest.
+También se puede elegir riesgo histórico o una combinación de 70% histórico y 30% RF
+para comparar resultados. Ambos componentes se devuelven por tramo para auditoría.
+
+KMeans no interviene en el entrenamiento, la predicción ni el ruteo.
+
+## Entrenar
+
+Desde `Backend`:
 
 ```powershell
-python -m pip install -r Backend/requirements.txt
-```
-
-## Entrenar o actualizar modelos
-
-Ejecutar desde `Backend`:
-
-```powershell
+python -m pip install -r requirements.txt
 python -m app.flujo_entrenamiento.ejecutar
 ```
 
-Para una prueba rápida:
+La primera ejecución descarga y guarda `data/red_vial_lima.graphml`. Las siguientes
+reutilizan esa red. Cuando se agreguen meses a `DELITOS TOTAL.csv`, basta con ejecutar
+el mismo comando.
+
+Opciones principales:
 
 ```powershell
-python -m app.flujo_entrenamiento.ejecutar --muestra 5000 --salida data/procesados_prueba
+python -m app.flujo_entrenamiento.ejecutar --ventana-meses 3 --radios 100 150 200
 ```
 
-Cuando se agreguen registros al CSV, basta con ejecutar nuevamente el comando completo.
-La fuente original nunca se modifica.
+## Artefactos
 
-La guía detallada para repetir Random Forest, XGBoost y las corridas
-experimentales está en `GUIA_ENTRENAMIENTO_Y_EXPERIMENTACION.md`.
+`data/procesados` contiene:
 
-## Artefactos generados
-
-La carpeta `data/procesados` contiene:
-
-- `delitos_original.csv`
 - `delitos_limpios.csv`
-- `delitos_con_riesgo.csv`
-- `delitos_asignados_a_tramo.csv`
-- `riesgo_por_tramo.csv`
-- `clusters_riesgo.csv`
-- `metricas_modelos.csv`
-- `modelo_ganador.json`
-- `modelo_ganador.joblib`
-- `predicciones_riesgo.csv`
-- `rutas_calculadas.csv`
+- `tramos_osm.csv`
+- `datos_random_forest.csv` (entrenamiento y prueba temporal)
+- `datos_prediccion_futura.csv` (entrada para el siguiente mes)
+- `comparacion_radios.csv`
+- `modelo_random_forest.joblib`
+- `predicciones_tramos.csv`
+- `metricas_random_forest.csv`
+- `classification_report_random_forest.csv`
+- `matriz_confusion_random_forest.csv`
+- `metadata_modelo.json`
 - `resumen_flujo.json`
+- `graficos/01_metricas_random_forest.png`
+- `graficos/02_matriz_confusion.png`
+- `graficos/03_metricas_por_clase.png`
+- `graficos/04_distribucion_predicciones.png`
+- `graficos/05_importancia_variables.png`
+- `graficos/06_comparacion_radios.png`
 
-Los archivos son generados y están ignorados por Git.
+Los gráficos se regeneran automáticamente al entrenar. También pueden crearse de nuevo
+sin reentrenar:
 
-## Selección del modelo
-
-Random Forest y XGBoost usan la misma partición train/test y las mismas variables.
-El ganador se elige, en este orden, por:
-
-1. Recall de la clase `alto`.
-2. F1 macro.
-3. F1 macro promedio en validación cruzada.
-4. Menor brecha entre train y test.
-
-El `riesgo_score` no se usa como variable predictora porque define la clase objetivo y
-su inclusión produciría fuga de información.
+```powershell
+python -m app.flujo_entrenamiento.graficos
+```
 
 ## Ejecutar API
 
@@ -79,27 +82,23 @@ Desde la raíz del proyecto:
 python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000 --app-dir Backend
 ```
 
-Endpoints conservados:
+Endpoints principales:
 
 - `GET /health`
-- `GET /risk-zones`
-- `GET /crime-points`
-- `POST /route`
 - `POST /api/route/calculate`
 - `GET /api/heatmap`
-- `GET /api/risk-zones`
+- `GET /api/prediction-heatmap`
+- `GET /api/prediction-points`
 - `GET /api/stats`
 - `GET /api/crime-points`
 - `GET /api/crime-filters`
 
-Los filtros por día, turno, tipo o modalidad modifican únicamente las capas
-visuales. El riesgo de la ruta siempre usa todo el historial disponible.
+Los filtros del mapa solo afectan las capas históricas. El criterio de ruteo se selecciona
+con `risk_mode`: `predicted` (predeterminado), `historical` o `hybrid`. Las capas RF
+muestran las predicciones por tramo del periodo indicado en `metadata_modelo.json`.
 
-El costo de A* es:
+## Pruebas
 
-```text
-costo_tramo = distancia_metros * (1 + alpha * riesgo_normalizado)
+```powershell
+python -m unittest discover -s tests -v
 ```
-
-Con `alpha = 0` se obtiene la ruta más rápida. Con valores mayores se penalizan
-los tramos de mayor riesgo.

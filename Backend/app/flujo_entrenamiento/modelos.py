@@ -1,247 +1,184 @@
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass
-
-os.environ.setdefault("LOKY_MAX_CPU_COUNT", "4")
 
 import numpy as np
 import pandas as pd
-from sklearn.cluster import KMeans
-from sklearn.compose import ColumnTransformer
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    classification_report,
     confusion_matrix,
     f1_score,
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
-from xgboost import XGBClassifier
+
+from app.flujo_entrenamiento.riesgo import VARIABLES_MODELO
 
 
 NIVELES_RIESGO = ["bajo", "medio", "alto"]
-VARIABLES_NUMERICAS = [
-    "latitud",
-    "longitud",
-    "frecuencia_delitos",
-    "suma_riesgo_base",
-    "promedio_riesgo",
-    "peso_delito_promedio",
-    "peso_delito_maximo",
-    "delitos_graves_cercanos",
-    "delitos_manana",
-    "delitos_tarde",
-    "delitos_noche",
-    "delitos_madrugada",
-    "cluster_kmeans",
-]
-VARIABLES_CATEGORICAS = ["distrito"]
+CODIGO_NIVEL = {nivel: indice for indice, nivel in enumerate(NIVELES_RIESGO)}
 
 
 @dataclass
-class ResultadoModelos:
-    tramos: pd.DataFrame
-    metricas: pd.DataFrame
-    modelos: dict[str, Pipeline]
-    ganador: dict
-    codificador_objetivo: LabelEncoder
+class ResultadoRandomForest:
+    modelo: Pipeline
+    metricas: dict
+    reporte: pd.DataFrame
+    matriz_confusion: np.ndarray
+    predicciones_futuras: pd.DataFrame
+    umbrales: dict
+    periodo_prueba: str
 
 
-def clasificar_clusters(tramos: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    resultado = tramos.copy()
-    variables = [
-        "frecuencia_delitos",
-        "suma_riesgo_base",
-        "peso_delito_promedio",
-        "peso_delito_maximo",
-        "delitos_graves_cercanos",
-        "riesgo_score",
-        "delitos_noche",
-        "delitos_madrugada",
+def entrenar_random_forest(
+    panel: pd.DataFrame,
+    futuro: pd.DataFrame,
+    random_state: int = 42,
+) -> ResultadoRandomForest:
+    """Entrena con periodos anteriores y reserva el último mes para prueba."""
+    periodos = sorted(panel["periodo_objetivo"].unique())
+    if len(periodos) < 2:
+        raise ValueError("Se requieren al menos dos periodos objetivo para evaluar el modelo.")
+    periodo_prueba = periodos[-1]
+    train = panel.loc[panel["periodo_objetivo"].ne(periodo_prueba)].copy()
+    test = panel.loc[panel["periodo_objetivo"].eq(periodo_prueba)].copy()
+    umbrales = calcular_umbrales(train["riesgo_bruto_futuro"])
+    y_train_texto = clasificar_riesgo(train["riesgo_bruto_futuro"], umbrales)
+    y_test_texto = clasificar_riesgo(test["riesgo_bruto_futuro"], umbrales)
+    y_train = y_train_texto.map(CODIGO_NIVEL).to_numpy()
+    y_test = y_test_texto.map(CODIGO_NIVEL).to_numpy()
+    indices_modelo = _submuestrear_clase_baja(y_train, random_state)
+    train_modelo = train.iloc[indices_modelo]
+    y_train_modelo = y_train[indices_modelo]
+
+    modelo = Pipeline(
+        [
+            ("imputacion", SimpleImputer(strategy="median")),
+            (
+                "modelo",
+                RandomForestClassifier(
+                    n_estimators=160,
+                    max_depth=14,
+                    min_samples_leaf=2,
+                    max_features="sqrt",
+                    class_weight="balanced_subsample",
+                    random_state=random_state,
+                    n_jobs=-1,
+                ),
+            ),
+        ]
+    )
+    modelo.fit(train_modelo[VARIABLES_MODELO], y_train_modelo)
+    prediccion = modelo.predict(test[VARIABLES_MODELO])
+    probabilidades = _probabilidades_completas(modelo, test[VARIABLES_MODELO])
+    matriz = confusion_matrix(y_test, prediccion, labels=[0, 1, 2])
+    reporte = pd.DataFrame(
+        classification_report(
+            y_test,
+            prediccion,
+            labels=[0, 1, 2],
+            target_names=NIVELES_RIESGO,
+            output_dict=True,
+            zero_division=0,
+        )
+    ).transpose()
+    binario_alto = (y_test == CODIGO_NIVEL["alto"]).astype(int)
+    pr_auc_alto = (
+        average_precision_score(binario_alto, probabilidades[:, 2])
+        if binario_alto.sum() > 0
+        else 0.0
+    )
+    metricas = {
+        "modelo": "Random Forest",
+        "periodo_prueba": periodo_prueba,
+        "registros_entrenamiento_total": int(len(train)),
+        "registros_entrenamiento_modelo": int(len(train_modelo)),
+        "registros_prueba": int(len(test)),
+        "accuracy": float(accuracy_score(y_test, prediccion)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_test, prediccion)),
+        "precision_macro": float(
+            precision_score(y_test, prediccion, average="macro", zero_division=0)
+        ),
+        "recall_macro": float(
+            recall_score(y_test, prediccion, average="macro", zero_division=0)
+        ),
+        "f1_macro": float(f1_score(y_test, prediccion, average="macro", zero_division=0)),
+        "recall_riesgo_alto": float(
+            recall_score(
+                y_test,
+                prediccion,
+                labels=[CODIGO_NIVEL["alto"]],
+                average="macro",
+                zero_division=0,
+            )
+        ),
+        "pr_auc_riesgo_alto": float(pr_auc_alto),
+    }
+
+    probabilidades_futuras = _probabilidades_completas(modelo, futuro[VARIABLES_MODELO])
+    codigo_futuro = probabilidades_futuras.argmax(axis=1)
+    predicciones = futuro[["tramo_id", "periodo_objetivo", "latitud", "longitud"]].copy()
+    predicciones["prob_bajo"] = probabilidades_futuras[:, 0]
+    predicciones["prob_medio"] = probabilidades_futuras[:, 1]
+    predicciones["prob_alto"] = probabilidades_futuras[:, 2]
+    predicciones["riesgo_score"] = (
+        0.5 * predicciones["prob_medio"] + predicciones["prob_alto"]
+    ).clip(0, 1)
+    predicciones["nivel_riesgo"] = [NIVELES_RIESGO[codigo] for codigo in codigo_futuro]
+    predicciones["modelo_usado"] = "Random Forest"
+    return ResultadoRandomForest(
+        modelo=modelo,
+        metricas=metricas,
+        reporte=reporte,
+        matriz_confusion=matriz,
+        predicciones_futuras=predicciones,
+        umbrales=umbrales,
+        periodo_prueba=periodo_prueba,
+    )
+
+
+def calcular_umbrales(valores: pd.Series) -> dict:
+    """Separa gravedad positiva en riesgo medio y alto sin fragmentar los ceros."""
+    positivos = valores.loc[valores > 0]
+    if positivos.empty:
+        raise ValueError("El periodo de entrenamiento no contiene delitos futuros asociados.")
+    umbral_alto = float(positivos.quantile(0.75))
+    return {"bajo_max": 0.0, "alto_desde": max(umbral_alto, 1e-9)}
+
+
+def clasificar_riesgo(valores: pd.Series, umbrales: dict) -> pd.Series:
+    condiciones = [
+        valores.le(umbrales["bajo_max"]),
+        valores.lt(umbrales["alto_desde"]),
     ]
-    escalados = StandardScaler().fit_transform(resultado[variables])
-    modelo = KMeans(n_clusters=3, random_state=42, n_init=20)
-    resultado["cluster_kmeans"] = modelo.fit_predict(escalados)
-
-    orden = (
-        resultado.groupby("cluster_kmeans")["riesgo_score"]
-        .mean()
-        .sort_values()
-        .index.tolist()
+    return pd.Series(
+        np.select(condiciones, ["bajo", "medio"], default="alto"),
+        index=valores.index,
     )
-    interpretacion = {
-        int(cluster): nivel for cluster, nivel in zip(orden, NIVELES_RIESGO)
-    }
-    resultado["nivel_riesgo_cluster"] = resultado["cluster_kmeans"].map(interpretacion)
-    resultado["nivel_riesgo"] = pd.qcut(
-        resultado["riesgo_score"].rank(method="first"),
-        q=3,
-        labels=NIVELES_RIESGO,
-    ).astype(str)
-    resumen = (
-        resultado.groupby(["cluster_kmeans", "nivel_riesgo_cluster"], as_index=False)
-        .agg(
-            tramos=("id_segmento", "size"),
-            riesgo_promedio=("riesgo_score", "mean"),
-            frecuencia_promedio=("frecuencia_delitos", "mean"),
-        )
-        .sort_values("riesgo_promedio")
-    )
-    return resultado, resumen
 
 
-def entrenar_y_comparar(tramos: pd.DataFrame) -> ResultadoModelos:
-    datos = tramos.copy()
-    objetivo = LabelEncoder()
-    objetivo.fit(NIVELES_RIESGO)
-    y = objetivo.transform(datos["nivel_riesgo"])
-    x = datos[VARIABLES_NUMERICAS + VARIABLES_CATEGORICAS]
-    indices_train, indices_test = train_test_split(
-        np.arange(len(datos)),
-        test_size=0.25,
-        random_state=42,
-        stratify=y,
-    )
-    x_train, x_test = x.iloc[indices_train], x.iloc[indices_test]
-    y_train, y_test = y[indices_train], y[indices_test]
+def _probabilidades_completas(modelo: Pipeline, x: pd.DataFrame) -> np.ndarray:
+    parciales = modelo.predict_proba(x)
+    clases = modelo.named_steps["modelo"].classes_
+    completas = np.zeros((len(x), 3), dtype=float)
+    for posicion, clase in enumerate(clases):
+        completas[:, int(clase)] = parciales[:, posicion]
+    return completas
 
-    modelos = {
-        "Random Forest": RandomForestClassifier(
-            n_estimators=260,
-            max_depth=12,
-            min_samples_leaf=2,
-            class_weight="balanced",
-            random_state=42,
-            n_jobs=4,
-        ),
-        "XGBoost": XGBClassifier(
-            n_estimators=260,
-            max_depth=6,
-            learning_rate=0.06,
-            subsample=0.85,
-            colsample_bytree=0.85,
-            objective="multi:softprob",
-            eval_metric="mlogloss",
-            random_state=42,
-            n_jobs=4,
-        ),
-    }
-    pipelines = {}
-    filas_metricas = []
-    predicciones_completas = {}
-    clase_alto = int(objetivo.transform(["alto"])[0])
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-    for nombre, estimador in modelos.items():
-        pipeline = Pipeline(
-            [
-                (
-                    "preprocesamiento",
-                    ColumnTransformer(
-                        [
-                            ("numericas", StandardScaler(), VARIABLES_NUMERICAS),
-                            (
-                                "categoricas",
-                                OneHotEncoder(handle_unknown="ignore"),
-                                VARIABLES_CATEGORICAS,
-                            ),
-                        ]
-                    ),
-                ),
-                ("modelo", estimador),
-            ]
-        )
-        pipeline.fit(x_train, y_train)
-        prediccion_test = pipeline.predict(x_test)
-        prediccion_train = pipeline.predict(x_train)
-        probabilidades = pipeline.predict_proba(x_test)
-        matriz = confusion_matrix(y_test, prediccion_test, labels=range(3))
-        recall_clases = recall_score(
-            y_test, prediccion_test, labels=range(3), average=None, zero_division=0
-        )
-        cv_scores = cross_val_score(
-            pipeline, x, y, scoring="f1_macro", cv=cv, n_jobs=1
-        )
-        accuracy_test = accuracy_score(y_test, prediccion_test)
-        accuracy_train = accuracy_score(y_train, prediccion_train)
-
-        filas_metricas.append(
-            {
-                "modelo": nombre,
-                "accuracy": round(float(accuracy_test), 6),
-                "precision_macro": round(
-                    float(precision_score(y_test, prediccion_test, average="macro", zero_division=0)),
-                    6,
-                ),
-                "recall_macro": round(
-                    float(recall_score(y_test, prediccion_test, average="macro", zero_division=0)),
-                    6,
-                ),
-                "f1_macro": round(
-                    float(f1_score(y_test, prediccion_test, average="macro", zero_division=0)),
-                    6,
-                ),
-                "recall_riesgo_alto": round(float(recall_clases[clase_alto]), 6),
-                "f1_cv_promedio": round(float(cv_scores.mean()), 6),
-                "f1_cv_desviacion": round(float(cv_scores.std()), 6),
-                "accuracy_train": round(float(accuracy_train), 6),
-                "brecha_train_test": round(float(accuracy_train - accuracy_test), 6),
-                "matriz_confusion": json.dumps(matriz.tolist()),
-                "registros_train": int(len(x_train)),
-                "registros_test": int(len(x_test)),
-                "probabilidad_alto_promedio_test": round(
-                    float(probabilidades[:, clase_alto].mean()), 6
-                ),
-            }
-        )
-        pipelines[nombre] = pipeline
-        all_predictions = pipeline.predict(x)
-        all_probabilities = pipeline.predict_proba(x)
-        class_names = objetivo.inverse_transform(np.arange(len(objetivo.classes_)))
-        class_scores = np.asarray(
-            [{"bajo": 0.2, "medio": 0.55, "alto": 0.9}[name] for name in class_names]
-        )
-        slug = "random_forest" if nombre == "Random Forest" else "xgboost"
-        predicciones_completas[nombre] = {
-            "level": objetivo.inverse_transform(all_predictions),
-            "high_probability": all_probabilities[:, clase_alto],
-            "score": all_probabilities @ class_scores,
-            "slug": slug,
-        }
-
-    metricas = pd.DataFrame(filas_metricas)
-    ranking = metricas.sort_values(
-        ["recall_riesgo_alto", "f1_macro", "f1_cv_promedio", "brecha_train_test"],
-        ascending=[False, False, False, True],
-    )
-    fila_ganadora = ranking.iloc[0]
-    nombre_ganador = str(fila_ganadora["modelo"])
-    ganador = {
-        "modelo": nombre_ganador,
-        "criterio_seleccion": (
-            "Mayor recall de riesgo alto; desempate por F1 macro, estabilidad "
-            "en validación cruzada y menor brecha train-test."
-        ),
-        "recall_riesgo_alto": float(fila_ganadora["recall_riesgo_alto"]),
-        "f1_macro": float(fila_ganadora["f1_macro"]),
-        "f1_cv_promedio": float(fila_ganadora["f1_cv_promedio"]),
-        "brecha_train_test": float(fila_ganadora["brecha_train_test"]),
-    }
-
-    for nombre, values in predicciones_completas.items():
-        slug = values["slug"]
-        datos[f"riesgo_predicho_{slug}"] = values["level"]
-        datos[f"probabilidad_alto_{slug}"] = values["high_probability"].round(6)
-        datos[f"score_modelo_{slug}"] = values["score"].round(6)
-
-    winner_values = predicciones_completas[nombre_ganador]
-    datos["riesgo_predicho"] = winner_values["level"]
-    datos["probabilidad_riesgo_alto"] = winner_values["high_probability"].round(6)
-    datos["score_modelo"] = winner_values["score"].round(6)
-    datos["modelo_usado"] = nombre_ganador
-    return ResultadoModelos(datos, metricas, pipelines, ganador, objetivo)
+def _submuestrear_clase_baja(y: np.ndarray, random_state: int) -> np.ndarray:
+    """Conserva todas las clases minoritarias y una muestra reproducible de bajo."""
+    indices_bajo = np.flatnonzero(y == CODIGO_NIVEL["bajo"])
+    indices_relevantes = np.flatnonzero(y != CODIGO_NIVEL["bajo"])
+    maximo_bajo = min(max(50_000, len(indices_relevantes) * 2), 250_000)
+    if len(indices_bajo) <= maximo_bajo:
+        return np.arange(len(y))
+    generador = np.random.default_rng(random_state)
+    muestra_bajo = generador.choice(indices_bajo, size=maximo_bajo, replace=False)
+    return np.sort(np.concatenate([indices_relevantes, muestra_bajo]))

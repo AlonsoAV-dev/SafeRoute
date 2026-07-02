@@ -1,9 +1,11 @@
 fastapi
 uvicorn[standard]
 scikit-learn
-xgboost
 networkx
 osmnx
+geopandas
 pandas
+numpy
+joblib
 matplotlib
 openpyxl

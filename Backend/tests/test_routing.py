@@ -10,13 +10,11 @@ from app.services.routing import _edge_cost, generate_route_comparison
 
 
 class FakeRiskModel:
-    model_name = "XGBoost"
+    model_name = "Random Forest"
+    prediction_period = "2025-07"
 
     def resolve_model(self, requested):
-        if requested == "random_forest":
-            return "Random Forest"
-        if requested == "xgboost":
-            return "XGBoost"
+        del requested
         return self.model_name
 
     def metrics_for_model(self, requested):
@@ -25,6 +23,14 @@ class FakeRiskModel:
     def predict_point(self, lat, lng, turno=None, modelo_riesgo="auto"):
         del lat, lng, turno, modelo_riesgo
         return RiskPrediction(score=0.2, level="bajo")
+
+    def predict_segment(self, tramo_id, midpoint):
+        del tramo_id
+        risky = abs(midpoint[0]) < 0.0002
+        return RiskPrediction(
+            score=0.9 if risky else 0.1,
+            level="alto" if risky else "bajo",
+        )
 
     def nearby_crime_stats(self, sample_points, radius_m):
         del radius_m
@@ -96,23 +102,49 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(all(0 <= value <= 1 for value in values))
         self.assertGreater(len(values), 1)
 
-    def test_manual_and_auto_model_selection(self):
-        for requested, expected in (
-            ("auto", "XGBoost"),
-            ("random_forest", "Random Forest"),
-            ("xgboost", "XGBoost"),
+    def test_route_uses_only_random_forest(self):
+        with patch(
+            "app.services.routing._build_osm_graph_base",
+            return_value=build_alternative_graph(),
         ):
-            with self.subTest(requested=requested), patch(
-                "app.services.routing._build_osm_graph_base",
-                return_value=build_alternative_graph(),
-            ):
-                result = generate_route_comparison(
+            result = generate_route_comparison(
+                origin=(0.0, 0.0),
+                destination=(0.0, 0.002),
+                risk_model=FakeRiskModel(),
+                modelo_riesgo="random_forest",
+            )
+        self.assertEqual(result["modelo_usado"], "Random Forest")
+        self.assertEqual(result["periodo_prediccion"], "2025-07")
+
+    def test_risk_mode_selects_the_expected_segment_score(self):
+        results = {}
+        with patch(
+            "app.services.routing._build_osm_graph_base",
+            return_value=build_alternative_graph(),
+        ):
+            for mode in ("predicted", "historical", "hybrid"):
+                results[mode] = generate_route_comparison(
                     origin=(0.0, 0.0),
                     destination=(0.0, 0.002),
                     risk_model=FakeRiskModel(),
-                    modelo_riesgo=requested,
+                    risk_mode=mode,
                 )
-                self.assertEqual(result["modelo_usado"], expected)
+
+        for mode, result in results.items():
+            self.assertEqual(result["modo_riesgo"], mode)
+            segment = result["traditional_route"]["segments"][0]
+            if mode == "predicted":
+                expected = segment["riesgo_predicho"]
+            elif mode == "historical":
+                expected = segment["riesgo_historico"]
+            else:
+                expected = (
+                    0.7 * segment["riesgo_historico"]
+                    + 0.3 * segment["riesgo_predicho"]
+                )
+            self.assertAlmostEqual(
+                segment["riesgo_segmento_normalizado"], expected, places=5
+            )
 
     def test_same_route_returns_explanatory_message(self):
         graph = nx.Graph()
@@ -133,4 +165,3 @@ class RoutingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

@@ -28,6 +28,33 @@ MESES_ES = {
     "octubre": "10",
     "noviembre": "11",
     "diciembre": "12",
+    "january": "01",
+    "february": "02",
+    "march": "03",
+    "april": "04",
+    "may": "05",
+    "june": "06",
+    "july": "07",
+    "august": "08",
+    "september": "09",
+    "october": "10",
+    "november": "11",
+    "december": "12",
+}
+
+NOMBRES_MESES_ES = {
+    1: "enero",
+    2: "febrero",
+    3: "marzo",
+    4: "abril",
+    5: "mayo",
+    6: "junio",
+    7: "julio",
+    8: "agosto",
+    9: "septiembre",
+    10: "octubre",
+    11: "noviembre",
+    12: "diciembre",
 }
 
 
@@ -37,18 +64,17 @@ def cargar_fuente(ruta: Path) -> pd.DataFrame:
     if extension in {".xlsx", ".xls"}:
         return pd.read_excel(ruta)
     if extension == ".csv":
-        primera_linea = ruta.open("r", encoding="utf-8-sig").readline()
+        with ruta.open("r", encoding="utf-8-sig") as archivo:
+            primera_linea = archivo.readline()
         separador = ";" if primera_linea.count(";") > primera_linea.count(",") else ","
         return pd.read_csv(ruta, sep=separador, encoding="utf-8-sig", low_memory=False)
     raise ValueError(f"Formato no soportado: {extension}. Use CSV, XLSX o XLS.")
 
 
 def limpiar_delitos(datos: pd.DataFrame) -> pd.DataFrame:
-    """Normaliza el dataset delictivo y descarta registros no utilizables."""
+    """Normaliza DELITOS TOTAL y descarta registros no utilizables."""
     limpios = pd.DataFrame(index=datos.index)
-    limpios["id_hecho"] = _primera_columna(
-        datos, ["id_dgc", "ID_DGC_03", "OBJECTID", "GlobalID"]
-    ).astype(str)
+    limpios["id_hecho"] = _identificador(datos)
     limpios["latitud"] = _numero(
         _primera_columna(datos, ["lat_hecho", "y", "latitud", "lat"])
     )
@@ -64,12 +90,6 @@ def limpiar_delitos(datos: pd.DataFrame) -> pd.DataFrame:
     limpios["departamento"] = _texto(
         _primera_columna(datos, ["departamento_hecho", "departamento"])
     )
-    limpios["ubigeo"] = _primera_columna(
-        datos, ["ubigeo_hecho_delito", "ubigeo_cia_hecho", "ubigeo"]
-    ).astype(str)
-    limpios["comisaria"] = _texto(
-        _primera_columna(datos, ["comisaria_hecho", "comisaria_registro", "comisaria"])
-    )
     limpios["tipo_delito"] = _texto(
         _primera_columna(datos, ["tipo_hecho", "tipo_delito", "tipo"])
     )
@@ -79,14 +99,14 @@ def limpiar_delitos(datos: pd.DataFrame) -> pd.DataFrame:
     limpios["modalidad"] = _texto(
         _primera_columna(datos, ["modalidad_hecho", "modalidad"])
     )
-    limpios["turno"] = _turno(
-        _primera_columna(datos, ["turno_hecho", "turno"])
-    )
+    limpios["turno"] = _turno(_primera_columna(datos, ["turno_hecho", "turno"]))
     limpios["fecha"] = _fecha(datos)
     limpios["hora"] = _hora(datos, limpios["turno"])
     limpios["anio"] = limpios["fecha"].dt.year
     limpios["mes"] = limpios["fecha"].dt.month
+    limpios["mes_nombre"] = limpios["mes"].map(NOMBRES_MESES_ES)
     limpios["dia"] = limpios["fecha"].dt.day
+    limpios["periodo"] = limpios["fecha"].dt.to_period("M").astype(str)
     limpios["dia_semana"] = limpios["fecha"].dt.day_name().map(
         {
             "Monday": "lunes",
@@ -105,10 +125,21 @@ def limpiar_delitos(datos: pd.DataFrame) -> pd.DataFrame:
         & limpios["longitud"].between(LIMITES_LIMA["lng_min"], LIMITES_LIMA["lng_max"])
     )
     limpios = limpios.loc[dentro_area].copy()
-    limpios = limpios.drop_duplicates(
-        subset=["id_hecho", "latitud", "longitud", "fecha", "tipo_delito"]
-    )
-    return limpios.reset_index(drop=True)
+    limpios = limpios.drop_duplicates(subset=["id_hecho"], keep="first")
+    return limpios.sort_values("fecha").reset_index(drop=True)
+
+
+def _identificador(datos: pd.DataFrame) -> pd.Series:
+    candidatos = ["GlobalID", "globalid", "id_dgc", "ID_DGC_03", "OBJECTID"]
+    resultado = pd.Series("", index=datos.index, dtype="object")
+    for columna in candidatos:
+        if columna not in datos.columns:
+            continue
+        valores = datos[columna].fillna("").astype(str).str.strip()
+        resultado = resultado.where(resultado.ne(""), valores)
+    faltantes = resultado.eq("")
+    resultado.loc[faltantes] = "FILA-" + resultado.index[faltantes].astype(str)
+    return resultado
 
 
 def _primera_columna(datos: pd.DataFrame, nombres: list[str]) -> pd.Series:
@@ -145,13 +176,16 @@ def _turno(serie: pd.Series) -> pd.Series:
 
 def _fecha(datos: pd.DataFrame) -> pd.Series:
     year_column = next(
-        (column for column in ("año_hecho", "anio_hecho") if column in datos.columns),
+        (column for column in ("año_hecho", "anio_hecho", "aÃ±o_hecho") if column in datos.columns),
         None,
     )
     if year_column and {"mes_hecho", "dia_hecho"}.issubset(datos.columns):
         componentes = pd.DataFrame(
             {
-                "year": pd.to_numeric(datos[year_column], errors="coerce"),
+                "year": pd.to_numeric(
+                    datos[year_column].astype(str).str.replace(",", "", regex=False),
+                    errors="coerce",
+                ),
                 "month": pd.to_numeric(datos["mes_hecho"], errors="coerce"),
                 "day": pd.to_numeric(datos["dia_hecho"], errors="coerce"),
             }
@@ -172,7 +206,5 @@ def _fecha(datos: pd.DataFrame) -> pd.Series:
 def _hora(datos: pd.DataFrame, turnos: pd.Series) -> pd.Series:
     fuente = _primera_columna(datos, ["hora_hecho", "hora"]).astype(str)
     hora = pd.to_numeric(fuente.str.extract(r"(\d{1,2})", expand=False), errors="coerce")
-    hora_turno = turnos.map(
-        {"madrugada": 2, "manana": 9, "tarde": 15, "noche": 21}
-    )
+    hora_turno = turnos.map({"madrugada": 2, "manana": 9, "tarde": 15, "noche": 21})
     return hora.fillna(hora_turno).clip(0, 23).astype(int)

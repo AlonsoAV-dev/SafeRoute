@@ -9,14 +9,12 @@ import uvicorn
 
 from app.schemas import (
     ApiHeatmapResponse,
-    ApiRiskZonesResponse,
     ApiRouteRequest,
     ApiRouteResponse,
     ApiStatsResponse,
     CrimePoint,
     RouteRequest,
     RouteResponse,
-    RiskZone,
 )
 from app.services.preprocessing import load_crime_records
 from app.services.risk_model import RiskModel
@@ -24,13 +22,8 @@ from app.services.routing import generate_route_comparison, generate_safe_route
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-REAL_DATASET_PATH = BASE_DIR / "data" / "AAV-DATASET.csv"
-LEGACY_DATASET_PATH = BASE_DIR / "data" / "DB-1JAN-28MARCH.csv"
-SAMPLE_DATASET_PATH = BASE_DIR / "data" / "sample_crimes.csv"
-DATASET_PATH = next(
-    (path for path in (REAL_DATASET_PATH, LEGACY_DATASET_PATH, SAMPLE_DATASET_PATH) if path.exists()),
-    REAL_DATASET_PATH,
-)
+REAL_DATASET_PATH = BASE_DIR / "data" / "DELITOS TOTAL.csv"
+DATASET_PATH = REAL_DATASET_PATH
 PROCESSED_MODEL_DIR = BASE_DIR / "data" / "procesados"
 
 records = load_crime_records(DATASET_PATH)
@@ -82,12 +75,10 @@ def health() -> dict:
         "records": len(records),
         "dataset": DATASET_PATH.name,
         "risk_model": risk_model.model_name,
+        "model_version": risk_model.model_version,
+        "feature_count": risk_model.feature_count,
+        "prediction_period": risk_model.prediction_period,
     }
-
-
-@app.get("/risk-zones", response_model=list[RiskZone])
-def risk_zones(turno: str = "noche") -> list[dict]:
-    return risk_model.get_zones(turno)
 
 
 @app.get("/crime-points", response_model=list[CrimePoint])
@@ -102,7 +93,6 @@ def crime_points(
         {
             "id": point["id"],
             "location": {"lat": point["lat"], "lng": point["lng"]},
-            "cluster": point["cluster"],
             "turno": point["turno"],
             "tipo": point["tipo"],
             "subtipo": point["subtipo"],
@@ -130,7 +120,7 @@ def route(request: RouteRequest) -> dict:
     return {
         **route_data,
         "turno": request.turno,
-        "zones_considered": risk_model.get_zones(request.turno),
+        "zones_considered": [],
     }
 
 
@@ -145,6 +135,7 @@ def api_route_calculate(request: ApiRouteRequest) -> dict:
             modelo_riesgo=request.modelo_riesgo,
             beta=request.beta,
             buffer_m=request.buffer_m,
+            risk_mode=request.risk_mode,
         )
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
@@ -163,24 +154,6 @@ def api_route_calculate(request: ApiRouteRequest) -> dict:
     }
 
 
-@app.get("/api/risk-zones", response_model=ApiRiskZonesResponse)
-def api_risk_zones(turno: str = "noche") -> dict:
-    zones = risk_model.get_zones(turno)
-    return {
-        "zones": [
-            {
-                "center": (zone["center"]["lat"], zone["center"]["lng"]),
-                "radius": zone["radius_m"],
-                "risk_level": zone["risk_level"],
-                "risk_score": zone["risk_score"],
-                "total_crimes": zone["total_crimes"],
-                "avg_crime_weight": zone["avg_crime_weight"],
-            }
-            for zone in zones
-        ]
-    }
-
-
 @app.get("/api/heatmap", response_model=ApiHeatmapResponse)
 def api_heatmap(
     turno: str | None = None,
@@ -190,6 +163,24 @@ def api_heatmap(
 ) -> dict:
     return {
         "points": risk_model.get_heatmap_points(turno, tipo, modalidad, dia_semana)
+    }
+
+
+@app.get("/api/prediction-heatmap", response_model=ApiHeatmapResponse)
+def api_prediction_heatmap() -> dict:
+    return {"points": risk_model.get_prediction_heatmap_points()}
+
+
+@app.get("/api/prediction-points")
+def api_prediction_points(
+    min_score: float = 0.34,
+    limit: int = 15_000,
+) -> dict:
+    points = risk_model.get_prediction_points(min_score=min_score, limit=limit)
+    return {
+        "points": points,
+        "total": len(points),
+        "prediction_period": risk_model.prediction_period,
     }
 
 
@@ -213,6 +204,7 @@ def api_crime_filters() -> dict:
 def api_stats() -> dict:
     return {
         "model_accuracy": round(risk_model.model_accuracy, 3),
-        "zones_count": risk_model.get_zone_count(),
+        "segments_count": risk_model.get_segment_count(),
+        "prediction_period": risk_model.prediction_period,
         "calc_time_ms": 0.0,
     }

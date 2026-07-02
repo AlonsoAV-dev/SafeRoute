@@ -2,7 +2,7 @@ import { Brain, MapPin, Sparkles } from 'lucide-react'
 
 function BottomMetrics({ stats }) {
   const accuracy = stats?.model_accuracy ? `${(stats.model_accuracy * 100).toFixed(1)}%` : '0.0%'
-  const zonesCount = stats?.zones_count ?? 0
+  const segmentsCount = stats?.segments_count ?? 0
   const calcTime = stats?.calc_time_ms ? `${stats.calc_time_ms} ms` : '0 ms'
 
   return (
@@ -22,9 +22,9 @@ function BottomMetrics({ stats }) {
           <MapPin size={16} />
         </div>
         <div>
-          <h4>Zonas detectadas</h4>
-          <p>Clustering K-Means</p>
-          <strong>Activas: {zonesCount}</strong>
+          <h4>Tramos evaluados</h4>
+          <p>Red vial OpenStreetMap</p>
+          <strong>Activos: {segmentsCount}</strong>
         </div>
       </div>
       <div className="metric-card">

@@ -1,4 +1,4 @@
-import { Clock3, MapPin, Search, ShieldCheck, X } from 'lucide-react'
+import { BrainCircuit, Clock3, History, Layers3, MapPin, Search, ShieldCheck, X } from 'lucide-react'
 
 function RoutePanel({
   originQuery,
@@ -7,7 +7,7 @@ function RoutePanel({
   geoLoading,
   geoStatus,
   routePreference,
-  riskModelSelection,
+  riskMode,
   status,
   error,
   onOriginQueryChange,
@@ -15,7 +15,7 @@ function RoutePanel({
   onClearLocation,
   onSelectionModeChange,
   onPreferenceChange,
-  onRiskModelChange,
+  onRiskModeChange,
   onGeocode,
   onSubmit,
 }) {
@@ -139,20 +139,38 @@ function RoutePanel({
           </div>
         </section>
 
-        <label className="model-selector">
-          <span>Modelo de riesgo</span>
-          <select
-            value={riskModelSelection}
-            onChange={(event) => onRiskModelChange(event.target.value)}
-          >
-            <option value="auto">Automático</option>
-            <option value="random_forest">Random Forest</option>
-            <option value="xgboost">XGBoost</option>
-          </select>
-          <small>
-            Automático selecciona el modelo con mejores métricas de validación.
-          </small>
-        </label>
+        <section className="route-step">
+          <div className="step-heading">
+            <span className="step-number">4</span>
+            <strong>Criterio de riesgo</strong>
+          </div>
+          <div className="toggle-buttons risk-mode-buttons">
+            <button
+              type="button"
+              className={riskMode === 'predicted' ? 'chip chip--active' : 'chip'}
+              onClick={() => onRiskModeChange('predicted')}
+            >
+              <BrainCircuit size={16} />
+              RF futuro
+            </button>
+            <button
+              type="button"
+              className={riskMode === 'historical' ? 'chip chip--active' : 'chip'}
+              onClick={() => onRiskModeChange('historical')}
+            >
+              <History size={16} />
+              Histórico
+            </button>
+            <button
+              type="button"
+              className={riskMode === 'hybrid' ? 'chip chip--active' : 'chip'}
+              onClick={() => onRiskModeChange('hybrid')}
+            >
+              <Layers3 size={16} />
+              Combinado
+            </button>
+          </div>
+        </section>
 
         {selectionMode && (
           <p className="selection-hint">

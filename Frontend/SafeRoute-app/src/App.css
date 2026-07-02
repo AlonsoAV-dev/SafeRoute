@@ -217,6 +217,17 @@ input:focus-visible {
   border: 1px solid var(--border-color);
 }
 
+.risk-mode-buttons {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.risk-mode-buttons .chip {
+  min-width: 0;
+  min-height: 44px;
+  padding: 7px 5px;
+  font-size: 11px;
+}
+
 .chip {
   min-height: 48px;
   padding: 8px 10px;
@@ -390,7 +401,7 @@ input:focus-visible {
   position: absolute;
   top: 70px;
   left: 18px;
-  z-index: 1150;
+  z-index: 1300;
   width: min(310px, calc(100% - 36px));
   max-height: calc(100% - 90px);
   padding: 15px;
@@ -437,7 +448,7 @@ input:focus-visible {
 
 .map-layer-switches {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
 }
 
@@ -540,6 +551,21 @@ input:focus-visible {
     #d9f99d 40%,
     #facc15 60%,
     #f97316 80%,
+    #dc2626 100%
+  );
+}
+
+.heatmap-gradient--historical {
+  background: linear-gradient(90deg, #fde047 0%, #fb923c 35%, #ef4444 70%, #7f1d1d 100%);
+}
+
+.heatmap-gradient--predicted {
+  background: linear-gradient(
+    90deg,
+    #0f766e 0%,
+    #22c55e 25%,
+    #facc15 50%,
+    #f97316 75%,
     #dc2626 100%
   );
 }
@@ -709,6 +735,12 @@ input:focus-visible {
 .risk-reduction {
   color: #16a34a;
   font-size: 26px;
+}
+
+.comparison-status {
+  color: #166534;
+  font-size: 16px;
+  line-height: 1.35;
 }
 
 .panel-card p,

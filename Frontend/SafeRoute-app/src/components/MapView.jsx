@@ -1,23 +1,27 @@
 import {
-  Circle,
   MapContainer,
   Marker,
   Polyline,
   TileLayer,
-  Tooltip,
   useMap,
   useMapEvents,
 } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet.heat'
 import { useEffect, useMemo, useState } from 'react'
-import { Crosshair, Filter, Layers3, Moon, RotateCcw, Sun, X } from 'lucide-react'
+import {
+  BrainCircuit,
+  Crosshair,
+  Filter,
+  Flame,
+  History,
+  Layers3,
+  Moon,
+  RotateCcw,
+  Sun,
+  X,
+} from 'lucide-react'
 
-const zoneColors = {
-  bajo: '#65a30d',
-  medio: '#f59e0b',
-  alto: '#dc2626',
-}
 const darkTiles = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
 const lightTiles = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
 
@@ -61,26 +65,35 @@ function MapClickPicker({ selectionMode, onPick }) {
   return null
 }
 
-function HeatLayer({ points }) {
+function HeatLayer({ points, variant = 'historical' }) {
   const map = useMap()
   useEffect(() => {
     if (!points?.length || map.getSize().y === 0 || map.getSize().x === 0) return undefined
+    const gradient =
+      variant === 'predicted'
+        ? {
+            0: '#0f766e',
+            0.25: '#22c55e',
+            0.5: '#facc15',
+            0.75: '#f97316',
+            1: '#dc2626',
+          }
+        : {
+            0: '#fde047',
+            0.35: '#fb923c',
+            0.7: '#ef4444',
+            1: '#7f1d1d',
+          }
     const layer = L.heatLayer(points, {
       radius: 23,
       blur: 19,
       maxZoom: 18,
       minOpacity: 0.28,
-      gradient: {
-        0: '#16a34a',
-        0.2: '#84cc16',
-        0.4: '#d9f99d',
-        0.6: '#facc15',
-        0.8: '#f97316',
-        1: '#dc2626',
-      },
+      max: 1,
+      gradient,
     }).addTo(map)
     return () => map.removeLayer(layer)
-  }, [map, points])
+  }, [map, points, variant])
   return null
 }
 
@@ -111,6 +124,34 @@ function CrimeLayer({ points }) {
   return null
 }
 
+function PredictionLayer({ points }) {
+  const map = useMap()
+  useEffect(() => {
+    if (!points?.length) return undefined
+    const renderer = L.canvas({ padding: 0.4 })
+    const group = L.layerGroup().addTo(map)
+    points.forEach((point) => {
+      const score = Number(point.risk_score)
+      const color = score >= 0.66 ? '#dc2626' : score >= 0.34 ? '#f59e0b' : '#16a34a'
+      L.circleMarker([point.lat, point.lng], {
+        renderer,
+        radius: score >= 0.66 ? 4.2 : 3,
+        color: '#ffffff',
+        fillColor: color,
+        weight: 0.8,
+        fillOpacity: 0.78,
+      })
+        .bindTooltip(
+          `<strong>Predicci&oacute;n Random Forest</strong><br>Riesgo: ${(score * 100).toFixed(1)}% (${point.risk_level})<br>Tramo: ${point.tramo_id}`,
+          { direction: 'top' },
+        )
+        .addTo(group)
+    })
+    return () => map.removeLayer(group)
+  }, [map, points])
+  return null
+}
+
 function FilterSelect({ label, name, value, options, onChange }) {
   return (
     <label className="map-filter-field">
@@ -132,10 +173,12 @@ function MapView({
   onPick,
   origin,
   destination,
-  riskZones,
   heatmapPoints,
   crimePoints,
+  predictionHeatmapPoints,
+  predictionPoints,
   crimeTotal,
+  predictionTotal,
   crimeFilters,
   filterOptions,
   mapLayers,
@@ -185,33 +228,13 @@ function MapView({
         <MapCenterUpdater center={mapCenter} />
         <MapSizeFixer />
         <MapClickPicker selectionMode={selectionMode} onPick={onPick} />
-        <HeatLayer points={heatmapPoints} />
+        <HeatLayer points={heatmapPoints} variant="historical" />
         <CrimeLayer points={crimePoints} />
+        <HeatLayer points={predictionHeatmapPoints} variant="predicted" />
+        <PredictionLayer points={predictionPoints} />
 
         {origin && <Marker position={origin} icon={originIcon} />}
         {destination && <Marker position={destination} icon={destinationIcon} />}
-        {riskZones.map((zone, index) => (
-          <Circle
-            key={`${zone.center[0]}-${zone.center[1]}-${index}`}
-            center={zone.center}
-            radius={Math.max(120, Math.min(900, zone.radius))}
-            pathOptions={{
-              color: zoneColors[zone.risk_level],
-              fillColor: zoneColors[zone.risk_level],
-              weight: 2,
-              dashArray: '5 5',
-              fillOpacity: 0.08,
-            }}
-          >
-            <Tooltip>
-              Cluster {index + 1}: {zone.total_crimes} delitos
-              <br />
-              Peso promedio: {zone.avg_crime_weight}
-              <br />
-              Riesgo: {zone.risk_score} ({zone.risk_level})
-            </Tooltip>
-          </Circle>
-        ))}
         {traditionalRoutePositions.length > 1 && (
           <>
             <Polyline
@@ -274,9 +297,11 @@ function MapView({
         <aside className="map-filter-panel">
           <div className="map-filter-header">
             <div>
-              <span>Explorar delitos</span>
+              <span>Capas de riesgo</span>
               <small>
-                {mapDataLoading ? 'Cargando…' : `${crimeTotal.toLocaleString('es-PE')} visibles`}
+                {mapDataLoading
+                  ? 'Cargando...'
+                  : `RF: ${predictionHeatmapPoints.length.toLocaleString('es-PE')} celdas · ${predictionTotal.toLocaleString('es-PE')} puntos${mapLayers.crimes ? ` · ${crimeTotal.toLocaleString('es-PE')} delitos` : ''}`}
               </small>
             </div>
             <button type="button" onClick={() => setFiltersOpen(false)} aria-label="Cerrar filtros">
@@ -291,7 +316,7 @@ function MapView({
                 checked={mapLayers.crimes}
                 onChange={(event) => onLayerChange('crimes', event.target.checked)}
               />
-              <Layers3 size={14} /> Delitos
+              <Layers3 size={14} /> Delitos históricos
             </label>
             <label>
               <input
@@ -299,15 +324,23 @@ function MapView({
                 checked={mapLayers.heatmap}
                 onChange={(event) => onLayerChange('heatmap', event.target.checked)}
               />
-              Mapa de calor
+              <History size={14} /> Calor histórico
             </label>
             <label>
               <input
                 type="checkbox"
-                checked={mapLayers.zones}
-                onChange={(event) => onLayerChange('zones', event.target.checked)}
+                checked={mapLayers.predictionHeatmap}
+                onChange={(event) => onLayerChange('predictionHeatmap', event.target.checked)}
               />
-              Clusters
+              <Flame size={14} /> Calor RF
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={mapLayers.predictionPoints}
+                onChange={(event) => onLayerChange('predictionPoints', event.target.checked)}
+              />
+              <BrainCircuit size={14} /> Puntos RF altos
             </label>
           </div>
 
@@ -343,20 +376,32 @@ function MapView({
             <RotateCcw size={14} /> Restablecer filtros
           </button>
           <p className="filter-note">
-            Estos filtros solo cambian la visualización. La ruta usa todo el historial.
+            Los filtros afectan solo las capas históricas. El calor RF incluye toda la red;
+            los puntos muestran hasta 15,000 tramos con mayor riesgo predicho.
           </p>
         </aside>
       )}
 
-      {mapLayers.heatmap && (
+      {(mapLayers.heatmap || mapLayers.predictionHeatmap) && (
         <div className="heatmap-legend">
-          <strong>Riesgo</strong>
-          <div className="heatmap-gradient" />
+          <strong>
+            {mapLayers.predictionHeatmap && !mapLayers.heatmap
+              ? 'Riesgo predicho por RF'
+              : mapLayers.heatmap && !mapLayers.predictionHeatmap
+                ? 'Riesgo histórico'
+                : 'Escala de riesgo'}
+          </strong>
+          <div
+            className={
+              mapLayers.predictionHeatmap && !mapLayers.heatmap
+                ? 'heatmap-gradient heatmap-gradient--predicted'
+                : 'heatmap-gradient heatmap-gradient--historical'
+            }
+          />
           <div>
             <span>Bajo</span>
             <span>Medio</span>
             <span>Alto</span>
-            <span>Crítico</span>
           </div>
         </div>
       )}

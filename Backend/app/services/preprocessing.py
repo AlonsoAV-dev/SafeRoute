@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from app.services.pesos_delito import normalizar_modalidad, obtener_peso_delito
+from app.services.pesos_delito import normalizar_modalidad, obtener_peso_desde_campos
 
 
 VALID_TURNOS = {"manana", "tarde", "noche", "madrugada"}
@@ -69,7 +69,9 @@ def _first_non_empty(row: dict[str, str], keys: tuple[str, ...]) -> str:
 
 def _day_of_week(row: dict[str, str]) -> str:
     try:
-        year_value = _first_non_empty(row, ("año_hecho", "anio_hecho")).replace(",", "")
+        year_value = _first_non_empty(
+            row, ("año_hecho", "anio_hecho", "aÃ±o_hecho")
+        ).replace(",", "")
         year = int(float(year_value))
         month = int(float(_first_non_empty(row, ("mes_hecho", "mes"))))
         day = int(float(_first_non_empty(row, ("dia_hecho", "dia"))))
@@ -78,14 +80,35 @@ def _day_of_week(row: dict[str, str]) -> str:
         return "desconocido"
 
 
+def _normalized_date(row: dict[str, str]) -> str:
+    try:
+        year_value = _first_non_empty(
+            row, ("año_hecho", "anio_hecho", "aÃ±o_hecho")
+        ).replace(",", "")
+        year = int(float(year_value))
+        month = int(float(_first_non_empty(row, ("mes_hecho", "mes"))))
+        day = int(float(_first_non_empty(row, ("dia_hecho", "dia"))))
+        return datetime(year, month, day).date().isoformat()
+    except (TypeError, ValueError):
+        return _first_non_empty(
+            row, ("fecha_hora_hecho", "fecha_hora_registro_hecho", "fecha")
+        )
+
+
 def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
     records: list[CrimeRecord] = []
+    identifiers: set[str] = set()
     with csv_path.open("r", encoding="utf-8-sig", newline="") as file:
         first_line = file.readline()
         file.seek(0)
         delimiter = ";" if first_line.count(";") > first_line.count(",") else ","
         reader = csv.DictReader(file, delimiter=delimiter)
         for row in reader:
+            identifier = _first_non_empty(
+                row, ("GlobalID", "globalid", "id_dgc", "ID_DGC_03", "OBJECTID")
+            )
+            if identifier and identifier in identifiers:
+                continue
             try:
                 lat = _parse_float(_first_non_empty(row, ("lat_hecho", "y")))
                 lng = _parse_float(_first_non_empty(row, ("long_hecho", "x")))
@@ -93,9 +116,14 @@ def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
                 continue
             if not is_valid_coordinate(lat, lng):
                 continue
+            if identifier:
+                identifiers.add(identifier)
 
             modalidad = normalizar_modalidad(
                 _first_non_empty(row, ("modalidad_hecho", "modalidad_he", "modalidad"))
+            ) or "NO ESPECIFICADO"
+            subtipo = normalizar_modalidad(
+                _first_non_empty(row, ("subtipo_hecho", "subtipo"))
             ) or "NO ESPECIFICADO"
             records.append(
                 CrimeRecord(
@@ -106,19 +134,14 @@ def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
                         _first_non_empty(row, ("tipo_hecho", "tipo"))
                     )
                     or "NO ESPECIFICADO",
-                    subtipo=normalizar_modalidad(
-                        _first_non_empty(row, ("subtipo_hecho", "subtipo"))
-                    )
-                    or "NO ESPECIFICADO",
+                    subtipo=subtipo,
                     modalidad=modalidad,
-                    peso_delito=obtener_peso_delito(modalidad),
+                    peso_delito=obtener_peso_desde_campos(modalidad, subtipo),
                     distrito=normalizar_modalidad(
                         _first_non_empty(row, ("distrito_hecho", "distrito"))
                     )
                     or "NO ESPECIFICADO",
-                    fecha=_first_non_empty(
-                        row, ("fecha_hora_hecho", "fecha_hora_registro_hecho", "fecha")
-                    ),
+                    fecha=_normalized_date(row),
                     dia_semana=_day_of_week(row),
                 )
             )
