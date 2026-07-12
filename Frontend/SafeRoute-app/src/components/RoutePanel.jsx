@@ -8,6 +8,7 @@ function RoutePanel({
   geoStatus,
   routePreference,
   riskMode,
+  riskModel,
   status,
   error,
   onOriginQueryChange,
@@ -16,6 +17,7 @@ function RoutePanel({
   onSelectionModeChange,
   onPreferenceChange,
   onRiskModeChange,
+  onRiskModelChange,
   onGeocode,
   onSubmit,
 }) {
@@ -142,6 +144,24 @@ function RoutePanel({
         <section className="route-step">
           <div className="step-heading">
             <span className="step-number">4</span>
+            <strong>Modelo predictivo</strong>
+          </div>
+          <div className="toggle-buttons model-buttons">
+
+            <button
+              type="button"
+              className={riskModel === 'xgboost' ? 'chip chip--active' : 'chip'}
+              onClick={() => onRiskModelChange('xgboost')}
+            >
+              <BrainCircuit size={16} />
+              XGBoost
+            </button>
+          </div>
+        </section>
+
+        <section className="route-step">
+          <div className="step-heading">
+            <span className="step-number">5</span>
             <strong>Criterio de riesgo</strong>
           </div>
           <div className="toggle-buttons risk-mode-buttons">

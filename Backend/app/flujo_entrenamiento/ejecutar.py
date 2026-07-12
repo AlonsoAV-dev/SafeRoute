@@ -11,7 +11,11 @@ import pandas as pd
 
 from app.flujo_entrenamiento.graficos import generar_graficos
 from app.flujo_entrenamiento.limpieza import cargar_fuente, limpiar_delitos
-from app.flujo_entrenamiento.modelos import NIVELES_RIESGO, entrenar_random_forest
+from app.flujo_entrenamiento.modelos import (
+    NIVELES_RIESGO,
+    entrenar_random_forest,
+    entrenar_xgboost,
+)
 from app.flujo_entrenamiento.red_vial import cargar_o_descargar_grafo, extraer_tramos
 from app.flujo_entrenamiento.riesgo import (
     VARIABLES_MODELO,
@@ -94,6 +98,7 @@ def ejecutar_flujo(
         how="left",
     )
     predicciones.to_csv(salida / "predicciones_tramos.csv", index=False)
+    predicciones.to_csv(salida / "predicciones_tramos_random_forest.csv", index=False)
     metricas_seleccionadas = {
         "radio_buffer_m": mejor_metadata["radio_buffer_m"],
         **mejor.metricas,
@@ -125,6 +130,65 @@ def ejecutar_flujo(
         {"pipeline": mejor.modelo, "metadata": metadata_modelo},
         salida / "modelo_random_forest.joblib",
     )
+
+    panel_seleccionado = pd.read_csv(salida / "datos_random_forest.csv")
+    futuro_seleccionado = pd.read_csv(salida / "datos_prediccion_futura.csv")
+    resultado_xgboost = entrenar_xgboost(panel_seleccionado, futuro_seleccionado)
+    predicciones_xgboost = resultado_xgboost.predicciones_futuras.merge(
+        tramos[["tramo_id", "u", "v", "key", "longitud_m", "geometria"]],
+        on="tramo_id",
+        how="left",
+    )
+    predicciones_xgboost.to_csv(
+        salida / "predicciones_tramos_xgboost.csv", index=False
+    )
+    metricas_xgboost = {
+        "radio_buffer_m": mejor_metadata["radio_buffer_m"],
+        **resultado_xgboost.metricas,
+    }
+    pd.DataFrame([metricas_xgboost]).to_csv(
+        salida / "metricas_xgboost.csv", index=False
+    )
+    resultado_xgboost.reporte.to_csv(
+        salida / "classification_report_xgboost.csv"
+    )
+    pd.DataFrame(
+        resultado_xgboost.matriz_confusion,
+        index=NIVELES_RIESGO,
+        columns=NIVELES_RIESGO,
+    ).to_csv(salida / "matriz_confusion_xgboost.csv")
+    metadata_xgboost = {
+        **mejor_metadata,
+        "modelo": "XGBoost",
+        "version_variables": "reducido_16",
+        "variables": VARIABLES_MODELO,
+        "umbrales": resultado_xgboost.umbrales,
+        "periodo_prueba": resultado_xgboost.periodo_prueba,
+        "radio_buffer_m": mejor_metadata["radio_buffer_m"],
+        "criterio_comparacion_modelo": (
+            "Mismo radio, variables, ventana temporal y periodo de prueba que Random Forest."
+        ),
+        "entrenado_en": datetime.now().isoformat(),
+    }
+    joblib.dump(
+        {"pipeline": resultado_xgboost.modelo, "metadata": metadata_xgboost},
+        salida / "modelo_xgboost.joblib",
+    )
+    with (salida / "metadata_modelo_xgboost.json").open("w", encoding="utf-8") as archivo:
+        json.dump(metadata_xgboost, archivo, ensure_ascii=False, indent=2)
+    comparacion_modelos = pd.DataFrame(
+        [metricas_seleccionadas, metricas_xgboost]
+    ).sort_values(
+        ["f1_macro", "recall_riesgo_alto", "pr_auc_riesgo_alto"],
+        ascending=False,
+    )
+    comparacion_modelos["seleccionado_ruteo"] = comparacion_modelos["modelo"].eq(
+        "Random Forest"
+    )
+    comparacion_modelos.to_csv(salida / "comparacion_modelos.csv", index=False)
+    del panel_seleccionado, futuro_seleccionado
+    gc.collect()
+
     archivos_graficos = generar_graficos(
         metricas_seleccionadas,
         mejor.reporte,
@@ -133,6 +197,17 @@ def ejecutar_flujo(
         mejor.modelo,
         salida / "graficos",
         comparacion_radios,
+    )
+    archivos_graficos_xgboost = generar_graficos(
+        metricas_xgboost,
+        resultado_xgboost.reporte,
+        resultado_xgboost.matriz_confusion,
+        predicciones_xgboost,
+        resultado_xgboost.modelo,
+        salida / "graficos" / "xgboost",
+        None,
+        nombre_modelo="XGBoost",
+        slug_modelo="xgboost",
     )
     with (salida / "metadata_modelo.json").open("w", encoding="utf-8") as archivo:
         json.dump(metadata_modelo, archivo, ensure_ascii=False, indent=2)
@@ -145,8 +220,11 @@ def ejecutar_flujo(
         "filas_panel": int(filas_panel),
         **mejor_metadata,
         "comparacion_radios": comparacion_radios.to_dict(orient="records"),
+        "comparacion_modelos": comparacion_modelos.to_dict(orient="records"),
         "metricas": metricas_seleccionadas,
+        "metricas_xgboost": metricas_xgboost,
         "graficos": archivos_graficos,
+        "graficos_xgboost": archivos_graficos_xgboost,
         "advertencia": (
             "El radio y las métricas deben volver a evaluarse al incorporar nuevos periodos."
         ),

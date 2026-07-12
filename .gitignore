@@ -6,6 +6,10 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.ipynb_checkpoints/
 
 # Virtual environments
 .venv/
@@ -14,10 +18,12 @@ venv/
 # Node
 node_modules/
 dist/
-*.md
 
-.PROJECT_CONTEXT.md
-outputs/
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
 # OS / editor
 .DS_Store
 Thumbs.db
@@ -30,11 +36,22 @@ cache/
 Frontend/cache/
 Backend/cache/
 
-# Experiment outputs
+# Local datasets and generated model artifacts
+Backend/data/*
+!Backend/data/README.md
+*.joblib
+*.pkl
+*.graphml
+
+# Experiment and report outputs
 Backend/experiments/outputs/
 Backend/experiments/*.csv
-Backend/data/procesados/
-Backend/data/procesados_prueba/
-Backend/data/DELITOS TOTAL.csv
-Backend/data/DELITOS TOTALold.csv
-Backend/data/*.graphml
+/Documentos/
+/*.docx
+/.codex_qa/
+/tmp_docx_render/
+/outputs/
+
+# Thesis document builders are local authoring utilities, not system code
+/tools/build_*_docx.py
+/tools/generar_word_resultados.py

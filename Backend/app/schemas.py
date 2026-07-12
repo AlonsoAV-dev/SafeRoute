@@ -42,7 +42,7 @@ class ApiRouteRequest(BaseModel):
     alpha: float = Field(default=0.7, ge=0.0, le=1.0)
     datetime: str | None = None
     routePreference: Literal["safe", "fast"] = "safe"
-    modelo_riesgo: Literal["random_forest"] = "random_forest"
+    modelo_riesgo: Literal["random_forest", "xgboost"] = "random_forest"
     beta: float = Field(default=10.0, ge=0.0, le=20.0)
     buffer_m: Literal[50, 100, 150, 200] = 200
     risk_mode: Literal["predicted", "historical", "hybrid"] = "predicted"

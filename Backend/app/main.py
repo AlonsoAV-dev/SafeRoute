@@ -18,7 +18,11 @@ from app.schemas import (
 )
 from app.services.preprocessing import load_crime_records
 from app.services.risk_model import RiskModel
-from app.services.routing import generate_route_comparison, generate_safe_route
+from app.services.routing import (
+    generate_route_comparison,
+    generate_safe_route,
+    preload_road_network,
+)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -33,6 +37,7 @@ risk_model = RiskModel(
     grid_size_m=RISK_GRID_SIZE_M,
     model_dir=PROCESSED_MODEL_DIR,
 )
+road_network = preload_road_network()
 
 app = FastAPI(
     title="SafeRoute API",
@@ -78,6 +83,8 @@ def health() -> dict:
         "model_version": risk_model.model_version,
         "feature_count": risk_model.feature_count,
         "prediction_period": risk_model.prediction_period,
+        "available_models": sorted(risk_model._model_keys),
+        "road_network": road_network,
     }
 
 
@@ -167,20 +174,26 @@ def api_heatmap(
 
 
 @app.get("/api/prediction-heatmap", response_model=ApiHeatmapResponse)
-def api_prediction_heatmap() -> dict:
-    return {"points": risk_model.get_prediction_heatmap_points()}
+def api_prediction_heatmap(modelo_riesgo: str | None = None) -> dict:
+    return {"points": risk_model.get_prediction_heatmap_points(modelo_riesgo)}
 
 
 @app.get("/api/prediction-points")
 def api_prediction_points(
     min_score: float = 0.34,
     limit: int = 15_000,
+    modelo_riesgo: str | None = None,
 ) -> dict:
-    points = risk_model.get_prediction_points(min_score=min_score, limit=limit)
+    points = risk_model.get_prediction_points(
+        min_score=min_score,
+        limit=limit,
+        modelo_riesgo=modelo_riesgo,
+    )
     return {
         "points": points,
         "total": len(points),
         "prediction_period": risk_model.prediction_period,
+        "model": risk_model.resolve_model(modelo_riesgo),
     }
 
 

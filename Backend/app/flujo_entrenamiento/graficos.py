@@ -25,11 +25,17 @@ def generar_graficos(
     modelo,
     salida: Path,
     comparacion_radios: pd.DataFrame | None = None,
+    nombre_modelo: str = "Random Forest",
+    slug_modelo: str = "random_forest",
 ) -> list[str]:
     """Genera visualizaciones reproducibles de la evaluación y las predicciones."""
     salida.mkdir(parents=True, exist_ok=True)
     archivos = [
-        _grafico_metricas(metricas, salida / "01_metricas_random_forest.png"),
+        _grafico_metricas(
+            metricas,
+            salida / f"01_metricas_{slug_modelo}.png",
+            nombre_modelo,
+        ),
         _grafico_matriz(matriz, salida / "02_matriz_confusion.png"),
         _grafico_clases(reporte, salida / "03_metricas_por_clase.png"),
         _grafico_distribucion(
@@ -74,7 +80,7 @@ def generar_desde_archivos(directorio: Path) -> list[str]:
     )
 
 
-def _grafico_metricas(metricas: dict, ruta: Path) -> Path:
+def _grafico_metricas(metricas: dict, ruta: Path, nombre_modelo: str) -> Path:
     claves = [
         ("accuracy", "Accuracy"),
         ("balanced_accuracy", "Accuracy balanceada"),
@@ -92,7 +98,7 @@ def _grafico_metricas(metricas: dict, ruta: Path) -> Path:
     ax.bar_label(barras, labels=[f"{valor:.3f}" for valor in valores], padding=4)
     ax.set_ylim(0, 1.08)
     ax.set_ylabel("Puntuación")
-    ax.set_title("Resultados de Random Forest en el periodo de prueba", weight="bold")
+    ax.set_title(f"Resultados de {nombre_modelo} en el periodo de prueba", weight="bold")
     ax.grid(axis="y", alpha=0.2)
     ax.tick_params(axis="x", rotation=25)
     fig.tight_layout()

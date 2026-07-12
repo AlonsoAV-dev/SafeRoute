@@ -6,6 +6,7 @@ import MapView from './components/MapView'
 import InfoPanel from './components/InfoPanel'
 
 const API_URL = 'http://127.0.0.1:8000/api'
+const PREDICTION_MAP_MODEL = 'xgboost'
 const LIMA_METRO_CENTER = [-12.0464, -77.0428]
 const DEFAULT_FORM = {
   originLat: '',
@@ -51,8 +52,7 @@ function App() {
   const [mapLayers, setMapLayers] = useState({
     crimes: false,
     heatmap: false,
-    predictionHeatmap: true,
-    predictionPoints: false,
+    predictionHeatmap: false,
   })
   const [mapDataLoading, setMapDataLoading] = useState(false)
   const [status, setStatus] = useState('idle')
@@ -63,6 +63,7 @@ function App() {
   const [mapCenter, setMapCenter] = useState(LIMA_METRO_CENTER)
   const [routePreference, setRoutePreference] = useState('safe')
   const [riskMode, setRiskMode] = useState('predicted')
+  const [riskModel, setRiskModel] = useState('random_forest')
   const [isResultsMinimized, setIsResultsMinimized] = useState(false)
 
   const safeRoute = routeData.safe
@@ -122,9 +123,13 @@ function App() {
         const requests = [
           mapLayers.heatmap ? fetch(`${API_URL}/heatmap${suffix}`) : null,
           mapLayers.crimes ? fetch(`${API_URL}/crime-points${suffix}`) : null,
-          mapLayers.predictionHeatmap ? fetch(`${API_URL}/prediction-heatmap`) : null,
-          mapLayers.predictionPoints
-            ? fetch(`${API_URL}/prediction-points?min_score=0.34&limit=15000`)
+          mapLayers.predictionHeatmap
+            ? fetch(`${API_URL}/prediction-heatmap?modelo_riesgo=${PREDICTION_MAP_MODEL}`)
+            : null,
+          mapLayers.predictionHeatmap
+            ? fetch(
+                `${API_URL}/prediction-points?min_score=0.66&limit=6000&modelo_riesgo=${PREDICTION_MAP_MODEL}`,
+              )
             : null,
         ]
         const [heatmapResponse, crimesResponse, predictionHeatmapResponse, predictionPointsResponse] =
@@ -149,7 +154,7 @@ function App() {
         }
 
         if (predictionHeatmapResponse) {
-          if (!predictionHeatmapResponse.ok) throw new Error('No se pudo cargar el calor RF.')
+          if (!predictionHeatmapResponse.ok) throw new Error('No se pudo cargar el calor XGBoost.')
           const predictionHeatmapData = await predictionHeatmapResponse.json()
           setPredictionHeatmapPoints(predictionHeatmapData.points ?? [])
         } else {
@@ -157,7 +162,9 @@ function App() {
         }
 
         if (predictionPointsResponse) {
-          if (!predictionPointsResponse.ok) throw new Error('No se pudieron cargar los tramos RF.')
+          if (!predictionPointsResponse.ok) {
+            throw new Error('No se pudieron cargar los tramos XGBoost.')
+          }
           const predictionData = await predictionPointsResponse.json()
           setPredictionPoints(predictionData.points ?? [])
           setPredictionTotal(predictionData.total ?? 0)
@@ -177,7 +184,6 @@ function App() {
     mapLayers.crimes,
     mapLayers.heatmap,
     mapLayers.predictionHeatmap,
-    mapLayers.predictionPoints,
   ])
 
   async function handleSubmit(event) {
@@ -200,7 +206,7 @@ function App() {
           alpha: Number(form.safetyWeight),
           datetime: new Date().toISOString().slice(0, 16),
           routePreference,
-          modelo_riesgo: 'random_forest',
+          modelo_riesgo: riskModel,
           beta: 10,
           buffer_m: 200,
           risk_mode: riskMode,
@@ -331,6 +337,7 @@ function App() {
         geoStatus={geoStatus}
         routePreference={routePreference}
         riskMode={riskMode}
+        riskModel={riskModel}
         status={status}
         error={error}
         onOriginQueryChange={setOriginQuery}
@@ -339,6 +346,7 @@ function App() {
         onSelectionModeChange={setSelectionMode}
         onPreferenceChange={handlePreferenceChange}
         onRiskModeChange={setRiskMode}
+        onRiskModelChange={setRiskModel}
         onGeocode={handleGeocode}
         onSubmit={handleSubmit}
       />

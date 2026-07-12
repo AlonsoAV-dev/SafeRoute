@@ -43,10 +43,11 @@ function InfoPanel({
   routeMeta,
 }) {
   const sameRoute = routeMeta?.misma_ruta === true
+  const modelName = routeMeta?.modelo_usado ?? 'modelo predictivo'
   const riskModeLabel = {
-    predicted: 'Predicción Random Forest',
+    predicted: `Predicción ${modelName}`,
     historical: 'Historial delictivo',
-    hybrid: 'Combinado (70% histórico + 30% RF)',
+    hybrid: `Combinado (70% histórico + 30% ${modelName})`,
   }[routeMeta?.modo_riesgo]
   return (
     <aside className="info-panel" aria-live="polite">

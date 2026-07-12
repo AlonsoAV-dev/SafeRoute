@@ -53,7 +53,7 @@ class RiskModelTests(unittest.TestCase):
         self.assertEqual(self.model.get_segment_count(), 0)
         self.assertEqual(self.model.resolve_model("auto"), "Random Forest")
 
-    def test_prediction_layers_expose_random_forest_segment_scores(self):
+    def test_prediction_layer_loads_segment_scores(self):
         with TemporaryDirectory() as directory:
             model_dir = Path(directory)
             (model_dir / "predicciones_tramos.csv").write_text(

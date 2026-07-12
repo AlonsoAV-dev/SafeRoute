@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import logging
-import socket
-from itertools import islice
-from math import ceil
+from functools import lru_cache
+from math import ceil, cos, radians
+from pathlib import Path
+from time import perf_counter
 from typing import Callable
 
 import networkx as nx
 import numpy as np
 import osmnx as ox
-from requests import RequestException
+from sklearn.neighbors import BallTree
 
-from app.services.risk_model import RiskModel, haversine_m, level_from_score
+from app.services.risk_model import (
+    RiskModel,
+    RiskPrediction,
+    haversine_m,
+    level_from_score,
+)
 from app.services.segmentos import construir_id_segmento
 
 
@@ -23,6 +29,8 @@ MIN_RISK_REDUCTION_PERCENT = 0.50
 DEFAULT_SPEED_KMH = 25
 HISTORICAL_RISK_WEIGHT = 0.70
 PREDICTED_RISK_WEIGHT = 0.30
+EARTH_RADIUS_M = 6_371_000
+ROAD_GRAPH_PATH = Path(__file__).resolve().parents[2] / "data" / "red_vial_lima.graphml"
 
 
 def generate_route_comparison(
@@ -34,17 +42,19 @@ def generate_route_comparison(
     buffer_m: int = 200,
     risk_mode: str = "predicted",
 ) -> dict:
+    started_at = perf_counter()
     model_used = risk_model.resolve_model(modelo_riesgo)
     try:
         graph, start_node, end_node, node_to_latlng = _build_osm_graph_base(
             origin, destination
         )
-        graph_source = "OpenStreetMap"
-    except (nx.NetworkXException, RequestException, ValueError, RuntimeError, OSError):
+        graph_source = "OpenStreetMap local"
+    except (nx.NetworkXException, ValueError, RuntimeError, OSError):
         graph, start_node, end_node, node_to_latlng = _build_grid_graph_base(
             origin, destination
         )
         graph_source = "grilla local"
+    graph_ready_at = perf_counter()
 
     risk_summary = _assign_segment_risks(
         graph,
@@ -52,7 +62,9 @@ def generate_route_comparison(
         risk_model,
         buffer_m,
         risk_mode,
+        modelo_riesgo,
     )
+    risks_ready_at = perf_counter()
     fast_path = _compute_path(
         graph, start_node, end_node, node_to_latlng, "cost_fast"
     )
@@ -131,7 +143,14 @@ def generate_route_comparison(
             f"con una variación de distancia de {distance_delta:+.2f} km."
         )
 
-    alternative_count = _count_alternatives(graph, start_node, end_node)
+    alternative_count = len(
+        {
+            tuple(route["node_path"])
+            for _, route, _ in safe_candidates
+        }
+        | {tuple(fast_route["node_path"])}
+    )
+    paths_ready_at = perf_counter()
     LOGGER.info(
         "route_comparison source=%s alternatives=%s model=%s buffer=%sm "
         "beta=%s fast_risk=%.4f safe_risk=%.4f fast_high=%s safe_high=%s "
@@ -198,6 +217,13 @@ def generate_route_comparison(
             "p95_riesgo_historico_bruto": round(
                 risk_summary["historical_p95_raw"], 6
             ),
+            "tiempo_grafo_ms": round((graph_ready_at - started_at) * 1000, 2),
+            "tiempo_riesgo_ms": round(
+                (risks_ready_at - graph_ready_at) * 1000, 2
+            ),
+            "tiempo_rutas_ms": round(
+                (paths_ready_at - risks_ready_at) * 1000, 2
+            ),
         },
         "mensaje": message,
     }
@@ -225,26 +251,41 @@ def _build_osm_graph_base(
     origin: tuple[float, float],
     destination: tuple[float, float],
 ) -> tuple[nx.MultiDiGraph, int, int, Callable[[int], tuple[float, float]]]:
-    if not _can_reach_overpass():
-        raise ValueError("OpenStreetMap no está disponible.")
-    ox.settings.use_cache = True
-    ox.settings.log_console = False
-    ox.settings.requests_timeout = 12
+    base_graph, node_ids, coordinates, node_tree = _load_local_road_network()
+    distances, indices = node_tree.query(
+        np.radians(np.asarray([origin, destination])),
+        k=1,
+    )
+    if float(distances.max()) * EARTH_RADIUS_M > 3_000:
+        raise ValueError("Los puntos están fuera de la red vial local.")
+    start_node = node_ids[int(indices[0][0])]
+    end_node = node_ids[int(indices[1][0])]
     mid_lat = (origin[0] + destination[0]) / 2
-    mid_lng = (origin[1] + destination[1]) / 2
     straight_distance = haversine_m(
         origin[0], origin[1], destination[0], destination[1]
     )
-    radius = min(7000, max(2200, straight_distance / 2 + 1400))
-    graph = ox.graph_from_point(
-        center_point=(mid_lat, mid_lng),
-        dist=radius,
-        network_type="drive",
-        simplify=True,
-    )
-    graph = ox.distance.add_edge_lengths(graph)
-    start_node = ox.distance.nearest_nodes(graph, origin[1], origin[0])
-    end_node = ox.distance.nearest_nodes(graph, destination[1], destination[0])
+    base_padding = min(2_000.0, max(750.0, straight_distance * 0.10 + 500.0))
+    graph = None
+    for multiplier in (1.0, 1.75, 3.0):
+        padding_m = base_padding * multiplier
+        lat_padding = padding_m / 111_320.0
+        lng_padding = padding_m / (111_320.0 * cos(radians(mid_lat)))
+        selected = np.flatnonzero(
+            (coordinates[:, 0] >= min(origin[0], destination[0]) - lat_padding)
+            & (coordinates[:, 0] <= max(origin[0], destination[0]) + lat_padding)
+            & (coordinates[:, 1] >= min(origin[1], destination[1]) - lng_padding)
+            & (coordinates[:, 1] <= max(origin[1], destination[1]) + lng_padding)
+        )
+        candidate = base_graph.subgraph([node_ids[index] for index in selected]).copy()
+        if (
+            start_node in candidate
+            and end_node in candidate
+            and nx.has_path(candidate, start_node, end_node)
+        ):
+            graph = candidate
+            break
+    if graph is None:
+        raise nx.NetworkXNoPath("No existe un corredor vial local entre los puntos.")
 
     def node_to_latlng(node: int) -> tuple[float, float]:
         data = graph.nodes[node]
@@ -253,12 +294,38 @@ def _build_osm_graph_base(
     return graph, start_node, end_node, node_to_latlng
 
 
-def _can_reach_overpass() -> bool:
-    try:
-        with socket.create_connection(("overpass-api.de", 443), timeout=1):
-            return True
-    except OSError:
-        return False
+@lru_cache(maxsize=1)
+def _load_local_road_network() -> tuple[
+    nx.MultiDiGraph,
+    tuple[int, ...],
+    np.ndarray,
+    BallTree,
+]:
+    if not ROAD_GRAPH_PATH.exists():
+        raise FileNotFoundError(f"No existe la red vial local: {ROAD_GRAPH_PATH}")
+    graph = ox.load_graphml(ROAD_GRAPH_PATH)
+    node_ids = tuple(graph.nodes)
+    coordinates = np.asarray(
+        [
+            [
+                float(graph.nodes[node]["y"]),
+                float(graph.nodes[node]["x"]),
+            ]
+            for node in node_ids
+        ],
+        dtype=float,
+    )
+    node_tree = BallTree(np.radians(coordinates), metric="haversine")
+    return graph, node_ids, coordinates, node_tree
+
+
+def preload_road_network() -> dict:
+    graph, node_ids, _, _ = _load_local_road_network()
+    return {
+        "nodes": len(node_ids),
+        "edges": graph.number_of_edges(),
+        "source": ROAD_GRAPH_PATH.name,
+    }
 
 
 def _build_grid_graph_base(
@@ -327,22 +394,33 @@ def _assign_segment_risks(
     risk_model: RiskModel,
     buffer_m: int,
     risk_mode: str,
+    modelo_riesgo: str,
 ) -> dict:
     if risk_mode not in {"predicted", "historical", "hybrid"}:
         raise ValueError(f"Modo de riesgo no soportado: {risk_mode}")
+    needs_historical = risk_mode in {"historical", "hybrid"}
+    needs_prediction = risk_mode in {"predicted", "hybrid"}
     edge_rows = []
     for u, v, key, data in _iter_edges(graph):
         start = node_to_latlng(u)
         end = node_to_latlng(v)
         midpoint = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
         length = float(data.get("length") or haversine_m(*start, *end))
-        crime_stats = risk_model.nearby_crime_stats(
-            _edge_sample_points(data, start, end),
-            buffer_m,
+        crime_stats = (
+            risk_model.nearby_crime_stats(
+                _edge_sample_points(data, start, end),
+                buffer_m,
+            )
+            if needs_historical
+            else {"count": 0, "weight_sum": 0.0, "weight_avg": 0.0}
         )
         raw_risk = crime_stats["weight_sum"] / max(length / 100, 1)
         tramo_id = construir_id_segmento(u, v, key, data)
-        prediction = risk_model.predict_segment(tramo_id, midpoint)
+        prediction = (
+            _predict_segment_with_model(risk_model, tramo_id, midpoint, modelo_riesgo)
+            if needs_prediction
+            else RiskPrediction(score=0.0, level="bajo")
+        )
         edge_rows.append(
             {
                 "u": u,
@@ -406,6 +484,18 @@ def _assign_segment_risks(
         "historical_p95_raw": historical_p95,
         "max": float(max((data["risk_segment_normalized"] for _, _, _, data in _iter_edges(graph)), default=0)),
     }
+
+
+def _predict_segment_with_model(
+    risk_model: RiskModel,
+    tramo_id: str,
+    midpoint: tuple[float, float],
+    modelo_riesgo: str,
+) -> RiskPrediction:
+    try:
+        return risk_model.predict_segment(tramo_id, midpoint, modelo_riesgo)
+    except TypeError:
+        return risk_model.predict_segment(tramo_id, midpoint)
 
 
 def _edge_sample_points(data, start, end) -> list[tuple[float, float]]:
@@ -534,26 +624,6 @@ def _risk_reduction(fast_risk: float, safe_risk: float) -> float:
     if fast_risk <= 1e-12:
         return 0.0
     return round(max(0.0, (fast_risk - safe_risk) / fast_risk * 100), 2)
-
-
-def _count_alternatives(graph, start_node, end_node) -> int:
-    try:
-        simple_graph = nx.DiGraph(graph) if graph.is_directed() else nx.Graph(graph)
-        return len(
-            list(
-                islice(
-                    nx.shortest_simple_paths(
-                        simple_graph,
-                        start_node,
-                        end_node,
-                        weight="cost_fast",
-                    ),
-                    3,
-                )
-            )
-        )
-    except (nx.NetworkXException, nx.NetworkXNoPath):
-        return 1
 
 
 def _spanish_route_alias(route: dict) -> dict:

@@ -1,16 +1,21 @@
-# React + Vite
+# Frontend SafeRoute
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Interfaz web del sistema de recomendacion de rutas seguras. Utiliza React,
+Vite, Leaflet y OpenStreetMap para mostrar delitos historicos, riesgo predicho
+por segmento y la comparacion entre ruta corta y ruta segura.
 
-Currently, two official plugins are available:
+## Ejecutar
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```powershell
+npm install
+npm run dev
+```
 
-## React Compiler
+El backend debe estar disponible en `http://127.0.0.1:8000`.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Verificar
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+```powershell
+npm run lint
+npm run build
+```

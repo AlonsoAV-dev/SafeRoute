@@ -102,7 +102,7 @@ class RoutingTests(unittest.TestCase):
         self.assertTrue(all(0 <= value <= 1 for value in values))
         self.assertGreater(len(values), 1)
 
-    def test_route_uses_only_random_forest(self):
+    def test_route_uses_requested_random_forest(self):
         with patch(
             "app.services.routing._build_osm_graph_base",
             return_value=build_alternative_graph(),

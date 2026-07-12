@@ -221,10 +221,21 @@ input:focus-visible {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.model-buttons {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .risk-mode-buttons .chip {
   min-width: 0;
   min-height: 44px;
   padding: 7px 5px;
+  font-size: 11px;
+}
+
+.model-buttons .chip {
+  min-width: 0;
+  min-height: 44px;
+  padding: 7px 6px;
   font-size: 11px;
 }
 
@@ -446,30 +457,35 @@ input:focus-visible {
   cursor: pointer;
 }
 
-.map-layer-switches {
+.map-layer-options {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 10px;
 }
 
-.map-layer-switches label {
-  min-height: 48px;
-  padding: 7px 5px;
+.map-layer-toggle {
+  min-height: 38px;
+  padding: 8px 10px;
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  gap: 4px;
+  gap: 7px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   color: #475569;
   background: #f8fafc;
-  font-size: 10px;
+  font-size: 11px;
   cursor: pointer;
 }
 
-.map-layer-switches input {
+.map-layer-toggle input {
   accent-color: #7e22ce;
+}
+
+.map-layer-toggle--historical input {
+  accent-color: #ea580c;
+}
+
+.map-layer-toggle--predicted input {
+  accent-color: #dc2626;
 }
 
 .map-filter-field {
@@ -521,12 +537,17 @@ input:focus-visible {
   line-height: 1.45;
 }
 
-.heatmap-legend {
+.heatmap-legends {
   position: absolute;
   bottom: 18px;
   left: 18px;
   z-index: 1050;
   width: 230px;
+  display: grid;
+  gap: 8px;
+}
+
+.heatmap-legend {
   padding: 10px 12px;
   display: grid;
   gap: 6px;
@@ -556,17 +577,25 @@ input:focus-visible {
 }
 
 .heatmap-gradient--historical {
-  background: linear-gradient(90deg, #fde047 0%, #fb923c 35%, #ef4444 70%, #7f1d1d 100%);
+  background: linear-gradient(
+    90deg,
+    #22c55e 5%,
+    #84cc16 25%,
+    #facc15 40%,
+    #f97316 55%,
+    #ef4444 68%,
+    #dc2626 82%,
+    #7f1d1d 100%
+  );
 }
 
 .heatmap-gradient--predicted {
   background: linear-gradient(
     90deg,
-    #0f766e 0%,
-    #22c55e 25%,
-    #facc15 50%,
-    #f97316 75%,
-    #dc2626 100%
+    #fef3c7 8%,
+    #facc15 35%,
+    #f97316 65%,
+    #b91c1c 100%
   );
 }
 
