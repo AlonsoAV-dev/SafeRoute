@@ -8,8 +8,6 @@ construye un panel tramo-temporal y compara Random Forest con XGBoost. Las
 probabilidades del modelo se convierten en un `riesgo_score` por segmento, que
 se incorpora al costo de A* para comparar una ruta corta con una ruta segura.
 
-K-Means no participa en el entrenamiento, la prediccion ni el ruteo.
-
 ## Estructura
 
 ```text
