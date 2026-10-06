@@ -1,4 +1,4 @@
-# Python
+# Cachés y archivos temporales de Python
 __pycache__/
 *.pyc
 *.pyo
@@ -11,47 +11,97 @@ htmlcov/
 *.egg-info/
 .ipynb_checkpoints/
 
-# Virtual environments
+# Entornos virtuales locales
 .venv/
 venv/
 
-# Node
+# Dependencias y compilaciones del frontend
 node_modules/
 dist/
 
-# Secrets and local configuration
+# Secretos y configuración de cada equipo
 .env
 .env.*
 !.env.example
 
-# OS / editor
+# Archivos del sistema operativo y del editor
 .DS_Store
 Thumbs.db
 *.log
 .vscode/
 .idea/
 
-# Local caches
+# Cachés locales
 cache/
 Frontend/cache/
 Backend/cache/
 
-# Local datasets and generated model artifacts
+# Datos locales y artefactos generados durante el entrenamiento
 Backend/data/*
-!Backend/data/README.md
 *.joblib
 *.pkl
 *.graphml
+*.npy
+*.npz
+*.pt
+*.pth
+*.onnx
+*.h5
+*.hdf5
+*.parquet
+*.feather
+*.xlsx
+*.xls
+*.xlsm
+*.xlsb
+~$*
 
-# Experiment and report outputs
+# Resultados de experimentación, documentos y material de tesis
 Backend/experiments/outputs/
 Backend/experiments/*.csv
 /Documentos/
-/*.docx
+/Presentaciones/
 /.codex_qa/
 /tmp_docx_render/
 /outputs/
+/archivo_local/
 
-# Thesis document builders are local authoring utilities, not system code
+# Generadores locales de documentos, por si se restauran desde el archivo local
 /tools/build_*_docx.py
 /tools/generar_word_resultados.py
+
+# Documentación y material académico: conservar localmente, excluir de Git
+*.[mM][dD]
+*.[mM][dD][xX]
+*.[dD][oO][cC]
+*.[dD][oO][cC][xX]
+*.[oO][dD][tT]
+*.[rR][tT][fF]
+*.[pP][dD][fF]
+*.[pP][pP][tT]
+*.[pP][pP][tT][xX]
+*.[pP][pP][sS]
+*.[pP][pP][sS][xX]
+*.[pP][oO][tT][xX]
+*.[oO][dD][pP]
+
+# Datos y evidencias exportadas; las configuraciones JSON sí forman parte del código
+*.[cC][sS][vV]
+*.[tT][sS][vV]
+*.[zZ][iI][pP]
+*.[rR][aA][rR]
+*.7z
+*.[pP][nN][gG]
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[mM][pP]4
+*.[mM][oO][vV]
+
+# Temporales generados al construir gráficos para PowerPoint
+.chart-data-*/
+
+# Texto auxiliar: permitir los archivos de dependencias necesarios
+*.[tT][xX][tT]
+!requirements.txt
+!requirements-*.txt
+!CMakeLists.txt

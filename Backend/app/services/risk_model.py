@@ -6,27 +6,31 @@ from collections import defaultdict
 from dataclasses import dataclass
 from math import atan2, cos, floor, radians, sin, sqrt
 from pathlib import Path
+from types import MappingProxyType
 
 import numpy as np
 from sklearn.neighbors import BallTree
 
 from app.services.preprocessing import CrimeRecord, normalize_turno
 
+# Relaciona los identificadores recibidos desde la API con los tres modelos del sistema.
 MODEL_ALIASES = {
     "auto": "random_forest",
     "random_forest": "random_forest",
     "rf": "random_forest",
     "xgboost": "xgboost",
     "xgb": "xgboost",
+    "lstm": "lstm",
 }
 MODEL_NAMES = {
     "random_forest": "Random Forest",
     "xgboost": "XGBoost",
+    "lstm": "LSTM",
 }
 DEFAULT_MODEL_KEY = "random_forest"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RiskPrediction:
     score: float
     level: str
@@ -40,6 +44,7 @@ def haversine_m(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
     return 2 * radius * atan2(sqrt(a), sqrt(1 - a))
 
 
+# Convierte el índice continuo a niveles usando los cortes 0,34 y 0,66.
 def level_from_score(score: float) -> str:
     if score >= 0.66:
         return "alto"
@@ -48,6 +53,7 @@ def level_from_score(score: float) -> str:
     return "bajo"
 
 
+# Centraliza las predicciones exportadas y los índices espaciales para consultar el riesgo.
 class RiskModel:
     """Consulta predicciones supervisadas por segmento y capas historicas."""
 
@@ -73,11 +79,15 @@ class RiskModel:
         self._prediction_heatmap: list[list[float]] = []
         self._prediction_tree: BallTree | None = None
         self._model_keys: set[str] = set()
+        self._model_metadata: dict[str, dict] = {}
         self._segment_scores_by_model: dict[str, dict[str, RiskPrediction]] = {}
+        self._segment_scores_by_model_turno: dict[str, dict[str, dict[str, RiskPrediction]]] = {}
         self._prediction_rows_by_model: dict[str, list[RiskPrediction]] = {}
+        self._prediction_rows_by_model_turno: dict[str, dict[str, list[RiskPrediction]]] = {}
         self._prediction_points_by_model: dict[str, list[dict]] = {}
         self._prediction_heatmap_by_model: dict[str, list[list[float]]] = {}
         self._prediction_tree_by_model: dict[str, BallTree] = {}
+        self.default_model_key = DEFAULT_MODEL_KEY
         self._lat0 = sum(record.lat for record in records) / len(records)
         self._lat_m_per_deg = 111_320.0
         self._lng_m_per_deg = self._lat_m_per_deg * cos(radians(self._lat0))
@@ -94,17 +104,62 @@ class RiskModel:
         key = self._resolve_model_key(requested)
         return self.model_metrics.get(MODEL_NAMES.get(key, self.model_name), {})
 
+    def segment_predictions(self, requested: str | None = None, turno: str | None = None):
+        """Predicciones originales, compartidas por la visualización y el ruteo."""
+        key = self._resolve_model_key(requested)
+        selected = normalize_turno(turno) if turno else None
+        predictions = self._segment_scores_by_model_turno.get(key, {}).get(selected)
+        return MappingProxyType(predictions if predictions is not None else self._segment_scores_by_model[key])
+
+    def spatial_risk_surface(self):
+        """Campo espacial único para el mapa y el costo de ruteo."""
+        if not hasattr(self, "_spatial_risk_surface"):
+            # Importación diferida: la superficie utiliza la misma red vial que el ruteo.
+            from app.services.risk_surface import RiskSurface
+            self._spatial_risk_surface = RiskSurface(self)
+        return self._spatial_risk_surface
+
+    def model_info(self, requested: str | None = None) -> dict:
+        key = self._resolve_model_key(requested)
+        metadata = self._model_metadata.get(key, {})
+        return {
+            "key": key,
+            "name": MODEL_NAMES[key],
+            "available": key in self._model_keys,
+            "prediction_period": metadata.get("periodo_prediccion", "no disponible"),
+            "supports_turns": bool(metadata.get("tramo_turno", False)),
+            "unit": "segmento × mes × turno" if metadata.get("tramo_turno") else "segmento × mes",
+            "training_end": metadata.get("entrenamiento_hasta"),
+        }
+
+    def available_models(self) -> list[dict]:
+        return [
+            self.model_info(key) if key in self._model_keys else {
+                "key": key, "name": name, "available": False,
+                "prediction_period": "no disponible", "supports_turns": False,
+            }
+            for key, name in MODEL_NAMES.items()
+        ]
+
+    # Busca la predicción del segmento y utiliza su ubicación cuando no encuentra una coincidencia exacta.
     def predict_segment(
         self,
         tramo_id: str,
         midpoint: tuple[float, float],
         modelo_riesgo: str | None = None,
+        turno: str | None = None,
     ) -> RiskPrediction:
         key = self._resolve_model_key(modelo_riesgo)
+        selected_turn = normalize_turno(turno) if turno else None
+        if selected_turn and selected_turn in self._segment_scores_by_model_turno.get(key, {}):
+            by_turn = self._segment_scores_by_model_turno[key][selected_turn]
+            exacta = by_turn.get(tramo_id)
+            if exacta is not None:
+                return exacta
         exacta = self._segment_scores_by_model.get(key, {}).get(tramo_id)
         if exacta is not None:
             return exacta
-        return self.predict_point(midpoint[0], midpoint[1], modelo_riesgo=modelo_riesgo)
+        raise ValueError(f"No existe una predicción de {MODEL_NAMES[key]} para el tramo {tramo_id} de este recorrido.")
 
     def predict_point(
         self,
@@ -113,10 +168,12 @@ class RiskModel:
         turno: str | None = None,
         modelo_riesgo: str | None = None,
     ) -> RiskPrediction:
-        del turno
         key = self._resolve_model_key(modelo_riesgo)
         prediction_tree = self._prediction_tree_by_model.get(key)
-        prediction_rows = self._prediction_rows_by_model.get(key, [])
+        selected_turn = normalize_turno(turno) if turno else None
+        prediction_rows = self._prediction_rows_by_model_turno.get(key, {}).get(
+            selected_turn, self._prediction_rows_by_model.get(key, [])
+        )
         if prediction_tree is not None:
             distances, indices = prediction_tree.query(
                 np.radians(np.asarray([[lat, lng]])), k=1
@@ -124,14 +181,14 @@ class RiskModel:
             distance_m = float(distances[0][0]) * 6_371_000
             if distance_m <= 1_000:
                 return prediction_rows[int(indices[0][0])]
-        stats = self.nearby_crime_stats([(lat, lng)], radius_m=100)
-        score = min(1.0, stats["weight_sum"] / 10.0)
-        return RiskPrediction(round(score, 6), level_from_score(score))
+        raise ValueError("No hay una predicción cercana del modelo seleccionado para un tramo de este recorrido.")
 
+    # Consulta los delitos próximos mediante el índice espacial de los registros históricos.
     def nearby_crime_stats(
         self,
         sample_points: list[tuple[float, float]],
         radius_m: float,
+        turno: str | None = None,
     ) -> dict:
         if not sample_points:
             return {"count": 0, "weight_sum": 0.0, "weight_avg": 0.0}
@@ -142,7 +199,11 @@ class RiskModel:
         )
         for resultado in consultas:
             indices.update(int(index) for index in resultado)
-        pesos = [self.records[index].peso_delito for index in indices]
+        selected_turn = normalize_turno(turno) if turno else None
+        pesos = [
+            self.records[index].peso_delito for index in indices
+            if not selected_turn or self.records[index].turno == selected_turn
+        ]
         return {
             "count": len(pesos),
             "weight_sum": float(sum(pesos)),
@@ -174,8 +235,13 @@ class RiskModel:
         tipo: str | None = None,
         modalidad: str | None = None,
         dia_semana: str | None = None,
+        limit: int = 20_000,
     ) -> list[dict]:
         records = self._filter_records(turno, tipo, modalidad, dia_semana)
+        maximum = max(1, min(int(limit), 50_000))
+        if len(records) > maximum:
+            stride = max(1, len(records) // maximum)
+            records = records[::stride][:maximum]
         return [
             {
                 "id": index,
@@ -201,21 +267,63 @@ class RiskModel:
 
     def get_prediction_points(
         self,
-        min_score: float = 0.34,
+        min_score: float = 0.0,
         limit: int = 15_000,
         modelo_riesgo: str | None = None,
+        balanced: bool = False,
+        bounds: tuple[float, float, float, float] | None = None,
     ) -> list[dict]:
         key = self._resolve_model_key(modelo_riesgo)
         minimum = min(1.0, max(0.0, float(min_score)))
         maximum = min(25_000, max(1, int(limit)))
+        source = self._prediction_points_by_model.get(key, [])
+        if bounds:
+            south, west, north, east = bounds
+            source = [point for point in source if south <= point["lat"] <= north and west <= point["lng"] <= east]
+        if balanced:
+            levels = ("bajo", "medio", "alto")
+            quota = max(1, maximum // len(levels))
+            buckets = {level: [] for level in levels}
+            for point in source:
+                level = point["risk_level"]
+                if point["risk_score"] >= minimum and level in buckets:
+                    buckets[level].append(point)
+            if sum(len(candidates) for candidates in buckets.values()) <= maximum:
+                return [point for level in levels for point in buckets[level]]
+            selected = {}
+            for level, candidates in buckets.items():
+                if len(candidates) <= quota:
+                    selected[level] = candidates
+                    continue
+                indices = np.linspace(0, len(candidates) - 1, quota, dtype=int)
+                selected[level] = [candidates[index] for index in indices]
+            return [point for level in levels for point in selected[level]][:maximum]
+
         points = []
-        for point in self._prediction_points_by_model.get(key, []):
+        for point in source:
             if point["risk_score"] < minimum:
                 break
             points.append(point)
             if len(points) >= maximum:
                 break
         return points
+
+    def get_prediction_counts(
+        self,
+        modelo_riesgo: str | None = None,
+        bounds: tuple[float, float, float, float] | None = None,
+    ) -> dict[str, int]:
+        key = self._resolve_model_key(modelo_riesgo)
+        counts = {"bajo": 0, "medio": 0, "alto": 0}
+        for point in self._prediction_points_by_model.get(key, []):
+            if bounds:
+                south, west, north, east = bounds
+                if not (south <= point["lat"] <= north and west <= point["lng"] <= east):
+                    continue
+            level = point["risk_level"]
+            if level in counts:
+                counts[level] += 1
+        return counts
 
     def get_filter_options(self) -> dict:
         return {
@@ -229,12 +337,15 @@ class RiskModel:
         return len(self._segment_scores)
 
     def _resolve_model_key(self, requested: str | None = None) -> str:
-        normalized = MODEL_ALIASES.get((requested or "auto").lower(), DEFAULT_MODEL_KEY)
-        if normalized in self._model_keys:
-            return normalized
-        if DEFAULT_MODEL_KEY in self._model_keys:
-            return DEFAULT_MODEL_KEY
-        return next(iter(self._model_keys), DEFAULT_MODEL_KEY)
+        request = (requested or "auto").lower()
+        if request == "auto":
+            return self.default_model_key
+        normalized = MODEL_ALIASES.get(request)
+        if normalized is None:
+            raise ValueError(f"Modelo de riesgo no soportado: {requested}")
+        if normalized not in self._model_keys:
+            raise ValueError(f"No hay predicciones disponibles para {MODEL_NAMES[normalized]}.")
+        return normalized
 
     def _filter_records(
         self,
@@ -276,22 +387,13 @@ class RiskModel:
             cells[key]["weight_sum"] += record.peso_delito
         return list(cells.values())
 
+    # Carga los artefactos de los modelos disponibles y sus metadatos de procedencia.
     def _load_predictions(self, model_dir: Path) -> None:
         configs = [
-            (
-                DEFAULT_MODEL_KEY,
-                MODEL_NAMES[DEFAULT_MODEL_KEY],
-                model_dir / "predicciones_tramos_random_forest.csv",
-                model_dir / "metricas_random_forest.csv",
-                model_dir / "metadata_modelo.json",
-            ),
-            (
-                "xgboost",
-                MODEL_NAMES["xgboost"],
-                model_dir / "predicciones_tramos_xgboost.csv",
-                model_dir / "metricas_xgboost.csv",
-                model_dir / "metadata_modelo_xgboost.json",
-            ),
+            (key, name, model_dir / f"predicciones_tramos_{key}.csv",
+             model_dir / f"metricas_{key}.csv",
+             model_dir / ("metadata_modelo.json" if key == DEFAULT_MODEL_KEY else f"metadata_modelo_{key}.json"))
+            for key, name in MODEL_NAMES.items()
         ]
         for key, name, predictions_path, metrics_path, metadata_path in configs:
             if key == DEFAULT_MODEL_KEY and not predictions_path.exists():
@@ -303,7 +405,24 @@ class RiskModel:
                 metrics_path,
                 metadata_path,
             )
+        marker = model_dir / "entrenamiento_completo.json"
+        if marker.exists():
+            selected = json.loads(marker.read_text(encoding="utf-8")).get("selected_for_routing")
+            if selected in self._model_keys:
+                self.default_model_key = selected
+                self.model_name = MODEL_NAMES[selected]
+                self.model_accuracy = float(self.model_metrics.get(self.model_name, {}).get("accuracy", 0.0))
+                self._segment_scores = self._segment_scores_by_model[selected]
+                self._prediction_rows = self._prediction_rows_by_model[selected]
+                self._prediction_points = self._prediction_points_by_model[selected]
+                self._prediction_tree = self._prediction_tree_by_model[selected]
+                self._prediction_heatmap = self._prediction_heatmap_by_model[selected]
+                metadata = self._model_metadata.get(selected, {})
+                self.prediction_period = str(metadata.get("periodo_prediccion", "no disponible"))
+                self.model_version = str(metadata.get("version_variables", "no disponible"))
+                self.feature_count = len(metadata.get("variables", []))
 
+    # Lee los scores, niveles y posibles predicciones por turno de un modelo exportado.
     def _load_model_predictions(
         self,
         key: str,
@@ -317,9 +436,19 @@ class RiskModel:
         coordinates = []
         segment_scores: dict[str, RiskPrediction] = {}
         prediction_rows: list[RiskPrediction] = []
+        turn_rows: dict[str, list[RiskPrediction]] = {
+            turn: [] for turn in ("madrugada", "manana", "tarde", "noche")
+        }
+        turn_scores: dict[str, dict[str, RiskPrediction]] = {
+            turn: {} for turn in turn_rows
+        }
         prediction_points: list[dict] = []
+        supports_turns = False
+        prediction_period = "no disponible"
         with predictions_path.open("r", encoding="utf-8-sig", newline="") as archivo:
-            for row in csv.DictReader(archivo):
+            reader = csv.DictReader(archivo)
+            supports_turns = any(f"riesgo_score_{turn}" in (reader.fieldnames or []) for turn in turn_rows)
+            for row in reader:
                 try:
                     score = min(1.0, max(0.0, float(row["riesgo_score"])))
                     prediction = RiskPrediction(
@@ -333,6 +462,16 @@ class RiskModel:
                     continue
                 segment_scores[str(row["tramo_id"])] = prediction
                 prediction_rows.append(prediction)
+                prediction_period = row.get("periodo_objetivo") or prediction_period
+                for turn in turn_rows if supports_turns else ():
+                    raw_turn_score = row.get(f"riesgo_score_{turn}")
+                    turn_score = score if raw_turn_score in (None, "") else min(
+                        1.0, max(0.0, float(raw_turn_score))
+                    )
+                    turn_level = row.get(f"nivel_riesgo_{turn}") or level_from_score(turn_score)
+                    turn_prediction = RiskPrediction(turn_score, turn_level)
+                    turn_scores[turn][str(row["tramo_id"])] = turn_prediction
+                    turn_rows[turn].append(turn_prediction)
                 prediction_points.append(
                     {
                         "tramo_id": str(row["tramo_id"]),
@@ -349,7 +488,9 @@ class RiskModel:
                 key=lambda point: point["risk_score"], reverse=True
             )
             self._segment_scores_by_model[key] = segment_scores
+            self._segment_scores_by_model_turno[key] = turn_scores if supports_turns else {}
             self._prediction_rows_by_model[key] = prediction_rows
+            self._prediction_rows_by_model_turno[key] = turn_rows if supports_turns else {}
             self._prediction_points_by_model[key] = prediction_points
             self._prediction_tree_by_model[key] = prediction_tree
             self._prediction_heatmap_by_model[key] = self._build_prediction_heatmap(key)
@@ -363,23 +504,29 @@ class RiskModel:
             with metrics_path.open("r", encoding="utf-8-sig", newline="") as archivo:
                 row = next(csv.DictReader(archivo), None)
             if row:
-                metricas = {
-                    key: float(value)
-                    for key, value in row.items()
-                    if key not in {"modelo", "periodo_prueba"} and value not in {None, ""}
-                }
+                metricas = {}
+                for metric, value in row.items():
+                    if metric == "modelo" or value in (None, ""):
+                        continue
+                    try:
+                        metricas[metric] = float(value)
+                    except ValueError:
+                        metricas[metric] = value
                 metricas["periodo_prueba"] = row.get("periodo_prueba", "")
                 self.model_metrics[name] = metricas
                 if key == DEFAULT_MODEL_KEY:
                     self.model_accuracy = float(metricas.get("accuracy", 0.0))
+        metadata = {"periodo_prediccion": prediction_period, "tramo_turno": supports_turns}
         if metadata_path.exists():
             with metadata_path.open("r", encoding="utf-8") as archivo:
-                metadata = json.load(archivo)
-            if key == DEFAULT_MODEL_KEY:
-                self.prediction_period = str(metadata.get("periodo_prediccion", "no disponible"))
-                self.model_version = str(metadata.get("version_variables", "no disponible"))
-                self.feature_count = len(metadata.get("variables", []))
+                metadata.update(json.load(archivo))
+        self._model_metadata[key] = metadata
+        if key == DEFAULT_MODEL_KEY:
+            self.prediction_period = str(metadata.get("periodo_prediccion", "no disponible"))
+            self.model_version = str(metadata.get("version_variables", "no disponible"))
+            self.feature_count = len(metadata.get("variables", []))
 
+    # Resume los puntos de predicción en celdas para la capa de calor de consulta.
     def _build_prediction_heatmap(
         self,
         modelo_riesgo: str | None = None,

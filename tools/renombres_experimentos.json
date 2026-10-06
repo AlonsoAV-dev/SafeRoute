@@ -1,0 +1,39 @@
+{
+  "fecha": "2026-10-04",
+  "motivo": "Nombres descriptivos, comentarios en español y actualización de importaciones; configuración predictiva conservada.",
+  "evidencias_originales_modificadas": false,
+  "compatibilidad_sha256": "9ffa84e174f9f5a53f16a0adec48c618f304d4a1ac5061b47c91401f27b326f0",
+  "archivos": {
+    "tools/validacion_temporal_mensual.py": {
+      "ruta_original": "tools/protocolo_rolling_mensual_2018.py",
+      "codigo_original_sha256": "d4bf7e4a9e3f5f5b2e70edafdb8a4dbe9ebce02bedeb3679b9dfed8cb1e72fe6",
+      "codigo_actual_sha256": "4a3f1a08640e83fbb6e8dcfc1fc465a457d9c22d740dfeb9426508e5ad2c8e85"
+    },
+    "tools/buffer300/modelos.py": {
+      "ruta_original": "tools/buffer300/experiment.py",
+      "codigo_original_sha256": "cb374e9ac335dc8648abe77e8d814bda1707a2ed09ee2889e47436e85de52b2e",
+      "codigo_actual_sha256": "6fa6b9bb799580f666cba2186d95c5fdf8bc666315e49b9934fd82f183183dc9"
+    },
+    "tools/probar_buffer_300_originales.py": {
+      "ruta_original": "tools/probar_buffer_300_originales.py",
+      "codigo_original_sha256": "8682614cee24e4e5979e45b603787c80eb209db07af00b44169baf83e0c0b3eb",
+      "codigo_actual_sha256": "a2d356b4c88e20c4565d7e9fca2c6ac056216efb3ac00c9edc650896688a07d9"
+    },
+    "tools/probar_alumbrado_fecha_xgb_lstm.py": {
+      "ruta_original": "tools/probar_alumbrado_fecha_xgb_lstm.py",
+      "codigo_original_sha256": "d674f1c712fb3bb7e2f5918d2ed6b6a5550220616b6b6fa85420274a2072edcc",
+      "codigo_actual_sha256": "40bdc6e10dbe6270b5dd5cbf1f96e674489622a0cc2cd39328d4c991f8c6b3e6"
+    },
+    "tools/modelos_mensuales.py": {
+      "ruta_original": "tools/probar_buffer_300_mensual_tres_modelos.py",
+      "codigo_original_sha256": "6ced2351f56552de12255a5d7997f9108b0e0db1773fbddd24bd6c3b5dd28926",
+      "codigo_actual_sha256": "ab008cc43a4eb9d2ce31f6fdebebf03fcfd5e3247963541cf91c2f0f7e5da0ac"
+    },
+    "tools/entrenamiento_snapping_nkde.py": {
+      "ruta_original": "tools/protocolo_snapping_nkde_mensual.py",
+      "codigo_original_sha256": "7e123f822c3bf62cc34e192643156a3fcd285002a6a55a1eed7143e340aed71a",
+      "codigo_actual_sha256": "e45d063e415ec2f4219874f42cadb0d47cd383d60b83b5151f5d80f560e9b8f7"
+    }
+  },
+  "normalizacion_codigo": "UTF-8 sin BOM y saltos de línea LF; las huellas originales y los datos conservan su hash de bytes"
+}

@@ -59,7 +59,8 @@ class RiskModelTests(unittest.TestCase):
             (model_dir / "predicciones_tramos.csv").write_text(
                 "tramo_id,latitud,longitud,riesgo_score,nivel_riesgo\n"
                 "OSM-1-2-10,-12.01,-77.01,0.82,alto\n"
-                "OSM-2-3-11,-12.02,-77.02,0.45,medio\n",
+                "OSM-2-3-11,-12.02,-77.02,0.45,medio\n"
+                "OSM-3-4-12,-12.03,-77.03,0.20,bajo\n",
                 encoding="utf-8",
             )
             (model_dir / "metadata_modelo.json").write_text(
@@ -71,6 +72,16 @@ class RiskModelTests(unittest.TestCase):
         self.assertEqual([point["risk_score"] for point in points], [0.82, 0.45])
         self.assertEqual(model.prediction_period, "2026-01")
         self.assertTrue(model.get_prediction_heatmap_points())
+
+        balanced = model.get_prediction_points(min_score=0, limit=3, balanced=True)
+        self.assertEqual(
+            {point["risk_level"] for point in balanced},
+            {"bajo", "medio", "alto"},
+        )
+        self.assertEqual(
+            model.get_prediction_counts(),
+            {"bajo": 1, "medio": 1, "alto": 1},
+        )
 
 
 if __name__ == "__main__":

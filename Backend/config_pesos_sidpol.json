@@ -1,0 +1,38 @@
+{
+  "descripcion": "Pesos iniciales de severidad para el modelo; son parámetros editables, no una valoración jurídica definitiva.",
+  "por_subtipo": {
+    "10101": 5,
+    "10103": 3,
+    "10401": 2,
+    "10409": 5,
+    "10501": 1,
+    "10502": 3,
+    "10508": 4,
+    "11201": 2,
+    "13002": 1,
+    "13003": 1,
+    "50801": 5,
+    "70101": 4,
+    "70102": 2,
+    "70104": 4,
+    "70704": 3,
+    "71001": 5,
+    "71002": 3,
+    "71101": 5,
+    "71102": 5
+  },
+  "por_modalidad": {
+    "1140109": 3,
+    "5040124": 2,
+    "5040125": 3
+  },
+  "palabras_modalidad": {
+    "SECUESTRO": 5,
+    "VIOLACION SEXUAL": 5,
+    "ROBO AGRAVADO": 4,
+    "HURTO AGRAVADO": 2,
+    "EXPLOSIV": 4,
+    "ARMA DE FUEGO": 4
+  },
+  "peso_por_defecto": 1
+}

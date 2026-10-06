@@ -1,0 +1,20 @@
+{
+  "source": "../outputs/delitos-georreferenciados/DELITOS 2018-2026 ESCENARIO UBICACIONES SIMULADAS.xlsx",
+  "graph": "data/red_vial_lima.graphml",
+  "output": "data/experimentos_sidpol/escenario_distrito/procesados",
+  "weights_file": "config_pesos_sidpol.json",
+  "match_radius_m": 150.0,
+  "min_monthly_geo_coverage": 0.8,
+  "history_months": 3,
+  "train_start": "2018-04",
+  "train_end": "2023-12",
+  "validation_start": "2024-01",
+  "validation_end": "2024-08",
+  "test_start": "2026-04",
+  "test_end": "2026-07",
+  "forecast_period": "2026-09",
+  "samples_per_class_per_month_turn": 450,
+  "random_state": 42,
+  "rf_trees": 120,
+  "xgb_trees": 200
+}

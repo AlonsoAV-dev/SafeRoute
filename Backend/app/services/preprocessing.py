@@ -10,9 +10,9 @@ from app.services.pesos_delito import normalizar_modalidad, obtener_peso_desde_c
 
 VALID_TURNOS = {"manana", "tarde", "noche", "madrugada"}
 LIMA_BOUNDS = {
-    "min_lat": -13.60,
-    "max_lat": -10.20,
-    "min_lng": -78.20,
+    "min_lat": -13.50,
+    "max_lat": -10.50,
+    "min_lng": -78.00,
     "max_lng": -76.00,
 }
 DAYS_ES = (
@@ -26,7 +26,8 @@ DAYS_ES = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
+# Representa un delito normalizado que puede consultar el servicio de riesgo.
 class CrimeRecord:
     lat: float
     lng: float
@@ -40,11 +41,13 @@ class CrimeRecord:
     dia_semana: str
 
 
+# Homogeneiza las etiquetas de turno antes de aplicar filtros.
 def normalize_turno(value: str) -> str:
     cleaned = normalizar_modalidad(value).lower()
     return cleaned if cleaned in VALID_TURNOS else "noche"
 
 
+# Descarta coordenadas fuera de los límites geográficos utilizados por el proyecto.
 def is_valid_coordinate(lat: float, lng: float) -> bool:
     return (
         LIMA_BOUNDS["min_lat"] <= lat <= LIMA_BOUNDS["max_lat"]
@@ -69,6 +72,9 @@ def _first_non_empty(row: dict[str, str], keys: tuple[str, ...]) -> str:
 
 def _day_of_week(row: dict[str, str]) -> str:
     try:
+        event_date = _first_non_empty(row, ("fecha_hora_hecho", "fecha"))
+        if event_date:
+            return DAYS_ES[datetime.fromisoformat(event_date.replace("/", "-")).weekday()]
         year_value = _first_non_empty(
             row, ("año_hecho", "anio_hecho", "aÃ±o_hecho")
         ).replace(",", "")
@@ -80,6 +86,7 @@ def _day_of_week(row: dict[str, str]) -> str:
         return "desconocido"
 
 
+# Reconstruye la fecha del hecho y utiliza los campos alternativos si faltan sus componentes.
 def _normalized_date(row: dict[str, str]) -> str:
     try:
         year_value = _first_non_empty(
@@ -95,6 +102,7 @@ def _normalized_date(row: dict[str, str]) -> str:
         )
 
 
+# Lee los formatos CSV admitidos, valida coordenadas y conserva la información delictiva normalizada.
 def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
     records: list[CrimeRecord] = []
     identifiers: set[str] = set()
@@ -103,27 +111,28 @@ def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
         file.seek(0)
         delimiter = ";" if first_line.count(";") > first_line.count(",") else ","
         reader = csv.DictReader(file, delimiter=delimiter)
+        deduplicate_ids = "id_hecho" not in (reader.fieldnames or [])
         for row in reader:
             identifier = _first_non_empty(
                 row, ("GlobalID", "globalid", "id_dgc", "ID_DGC_03", "OBJECTID")
             )
-            if identifier and identifier in identifiers:
+            if deduplicate_ids and identifier and identifier in identifiers:
                 continue
             try:
-                lat = _parse_float(_first_non_empty(row, ("lat_hecho", "y")))
-                lng = _parse_float(_first_non_empty(row, ("long_hecho", "x")))
+                lat = _parse_float(_first_non_empty(row, ("lat_hecho", "y", "latitud")))
+                lng = _parse_float(_first_non_empty(row, ("long_hecho", "x", "longitud")))
             except ValueError:
                 continue
             if not is_valid_coordinate(lat, lng):
                 continue
-            if identifier:
+            if deduplicate_ids and identifier:
                 identifiers.add(identifier)
 
             modalidad = normalizar_modalidad(
                 _first_non_empty(row, ("modalidad_hecho", "modalidad_he", "modalidad"))
             ) or "NO ESPECIFICADO"
             subtipo = normalizar_modalidad(
-                _first_non_empty(row, ("subtipo_hecho", "subtipo"))
+                _first_non_empty(row, ("subtipo_hecho", "subtipo_delito", "subtipo"))
             ) or "NO ESPECIFICADO"
             records.append(
                 CrimeRecord(
@@ -131,12 +140,16 @@ def load_crime_records(csv_path: Path) -> list[CrimeRecord]:
                     lng=lng,
                     turno=normalize_turno(_first_non_empty(row, ("turno_hecho", "turno"))),
                     tipo=normalizar_modalidad(
-                        _first_non_empty(row, ("tipo_hecho", "tipo"))
+                        _first_non_empty(row, ("tipo_hecho", "tipo_delito", "tipo"))
                     )
                     or "NO ESPECIFICADO",
                     subtipo=subtipo,
                     modalidad=modalidad,
-                    peso_delito=obtener_peso_desde_campos(modalidad, subtipo),
+                    peso_delito=(
+                        int(row["peso_delito"])
+                        if row.get("peso_delito") not in (None, "")
+                        else obtener_peso_desde_campos(modalidad, subtipo)
+                    ),
                     distrito=normalizar_modalidad(
                         _first_non_empty(row, ("distrito_hecho", "distrito"))
                     )

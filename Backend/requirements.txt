@@ -7,6 +7,10 @@ osmnx
 geopandas
 pandas
 numpy
+scipy
+shapely
+pyproj
 joblib
 matplotlib
 openpyxl
+tzdata

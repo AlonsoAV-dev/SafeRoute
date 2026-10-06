@@ -1,0 +1,21 @@
+{
+  "experiment": "escenario_distrito_observado_v1",
+  "source_config": "config_entrenamiento_sidpol_escenario_distrito.json",
+  "output": "data/experimentos_sidpol/escenario_distrito/modelos",
+  "windows": [1, 3, 6, 12],
+  "high_threshold": 3.0,
+  "minimum_history_coverage": 0.8,
+  "calibration_months": ["2024-01", "2024-02", "2024-03", "2024-04"],
+  "selection_months": ["2024-05", "2024-06", "2024-07", "2024-08"],
+  "retrospective_months": ["2026-04", "2026-05", "2026-06", "2026-07", "2026-08"],
+  "negative_ratio": 3,
+  "minimum_negatives": 900,
+  "active_negative_fraction": 0.6,
+  "random_state": 42,
+  "threads": 10,
+  "candidates": [
+    {"name": "base_rf", "family": "rf", "features": "legacy", "legacy": true},
+    {"name": "base_xgb", "family": "xgb", "features": "legacy", "legacy": true},
+    {"name": "xgb_multi_recent", "family": "xgb", "features": "multi", "trees": 360, "depth": 4, "weight_power": 0.5, "half_life_months": 24}
+  ]
+}

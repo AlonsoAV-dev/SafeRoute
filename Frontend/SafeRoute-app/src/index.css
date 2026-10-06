@@ -1,23 +1,19 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
 :root {
-  --bg-primary: #0f1117;
-  --bg-secondary: #1a1d27;
-  --bg-card: #1e2130;
-  --bg-input: #252836;
-  --accent-green: #22c55e;
-  --accent-green-dark: #16a34a;
-  --accent-green-glow: rgba(34, 197, 94, 0.15);
-  --text-primary: #f1f5f9;
-  --text-secondary: #94a3b8;
+  --bg-primary: #f3f6fa;
+  --bg-secondary: #ffffff;
+  --bg-card: #ffffff;
+  --bg-input: #f8fafc;
+  --accent-primary: #0879f9;
+  --accent-soft: rgba(8, 121, 249, .08);
+  --accent-green-dark: #0668d8;
+  --text-primary: #12213a;
+  --text-secondary: #475569;
   --text-muted: #64748b;
-  --border-color: #2d3148;
-  --risk-high: #ef4444;
-  --risk-medium: #f59e0b;
+  --border-color: #e2e8f0;
   --risk-low: #22c55e;
-  --sidebar-width: 220px;
-  --panel-width: 300px;
-  font-family: 'Inter', sans-serif;
+  --risk-medium: #f59e0b;
+  --risk-high: #ef4444;
+  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   font-size: 14px;
   color: var(--text-primary);
   background: var(--bg-primary);
@@ -26,36 +22,11 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
-
-* {
-  box-sizing: border-box;
-}
-
-body {
-  margin: 0;
-  background: var(--bg-primary);
-}
-
-a {
-  color: inherit;
-  text-decoration: none;
-}
-
-button,
-input,
-select {
-  font-family: inherit;
-}
-
-::-webkit-scrollbar {
-  width: 8px;
-}
-
-::-webkit-scrollbar-track {
-  background: var(--bg-secondary);
-}
-
-::-webkit-scrollbar-thumb {
-  background: var(--accent-green);
-  border-radius: 10px;
-}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: var(--bg-primary); }
+a { color: inherit; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; }
+svg { flex-shrink: 0; }
+::selection { color: #f0fdf4; background: #166534; }

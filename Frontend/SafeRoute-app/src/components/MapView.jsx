@@ -1,14 +1,17 @@
 import {
   MapContainer,
   Marker,
+  Pane,
   Polyline,
   TileLayer,
+  Tooltip,
+  ZoomControl,
   useMap,
   useMapEvents,
 } from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet.heat'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   BrainCircuit,
   Crosshair,
@@ -20,19 +23,28 @@ import {
   Sun,
   X,
 } from 'lucide-react'
+import { ALTERNATIVE_COLOR, RISK_LEVELS, ROUTE_COLOR, escapeHtml } from '../lib/presentation'
+import RiskSurfaceLayer from './RiskSurfaceLayer'
 
-const darkTiles = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
-const lightTiles = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
-const XGBOOST_HEAT_MAX_ZOOM = 13
-
-function FitRoute({ route }) {
+const baseTiles = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png'
+// Ajusta el encuadre cuando se solicita enfocar la ruta, preservando después el zoom elegido por el usuario.
+function FitRoute({ route, resultsOpen, focusRequest }) {
   const map = useMap()
+  const lastFocusRequest = useRef(null)
   useEffect(() => {
-    if (route.length > 1) map.fitBounds(route, { padding: [42, 42] })
-  }, [map, route])
+    if (route.length < 2 || lastFocusRequest.current === focusRequest) return
+    lastFocusRequest.current = focusRequest
+    const card = map.getContainer().closest('.map-stage')?.querySelector('.results-area')
+    const floatingCard = card && window.matchMedia('(min-width: 1025px)').matches
+    map.fitBounds(route, {
+      paddingTopLeft: [48, 76],
+      paddingBottomRight: [floatingCard ? card.offsetWidth + 36 : 42, 48],
+    })
+  }, [map, route, resultsOpen, focusRequest])
   return null
 }
 
+// Centra el mapa al cambiar una ubicación seleccionada desde el formulario.
 function MapCenterUpdater({ center }) {
   const map = useMap()
   useEffect(() => {
@@ -41,21 +53,26 @@ function MapCenterUpdater({ center }) {
   return null
 }
 
+// Actualiza el tamaño de Leaflet cuando cambia la distribución responsive del aplicativo.
 function MapSizeFixer() {
   const map = useMap()
   useEffect(() => {
-    const refresh = () => map.invalidateSize()
+    const refresh = () => map.invalidateSize({ pan: false, debounceMoveend: true })
+    const observer = new ResizeObserver(refresh)
+    observer.observe(map.getContainer())
     refresh()
     const timer = window.setTimeout(refresh, 240)
     window.addEventListener('resize', refresh)
     return () => {
       window.clearTimeout(timer)
+      observer.disconnect()
       window.removeEventListener('resize', refresh)
     }
   }, [map])
   return null
 }
 
+// Convierte el clic del usuario en un punto de inicio o destino según el modo de selección.
 function MapClickPicker({ selectionMode, onPick }) {
   useMapEvents({
     click(event) {
@@ -65,6 +82,7 @@ function MapClickPicker({ selectionMode, onPick }) {
   return null
 }
 
+// Dibuja la capa de calor histórica y elimina sus recursos al desactivarla.
 function HeatLayer({ points, variant = 'historical' }) {
   const map = useMap()
   useEffect(() => {
@@ -89,7 +107,7 @@ function HeatLayer({ points, variant = 'historical' }) {
     const layer = L.heatLayer(points, {
       radius: variant === 'predicted' ? 20 : 17,
       blur: variant === 'predicted' ? 16 : 8,
-      maxZoom: variant === 'predicted' ? XGBOOST_HEAT_MAX_ZOOM : 17,
+      maxZoom: variant === 'predicted' ? 13 : 17,
       minOpacity: 0.12,
       max: variant === 'predicted' ? 1.2 : 1,
       gradient,
@@ -99,6 +117,7 @@ function HeatLayer({ points, variant = 'historical' }) {
   return null
 }
 
+// Representa los delitos históricos con una capa canvas para reducir el costo de dibujar numerosos puntos.
 function CrimeLayer({ points }) {
   const map = useMap()
   useEffect(() => {
@@ -116,7 +135,7 @@ function CrimeLayer({ points }) {
         fillOpacity: severe ? 0.82 : 0.52,
       })
         .bindTooltip(
-          `<strong>${point.modalidad}</strong><br>Peso: ${point.peso_delito}/5<br>${point.distrito}`,
+          `<strong>${escapeHtml(point.modalidad)}</strong><br>Peso: ${point.peso_delito}/5<br>${escapeHtml(point.distrito)}`,
           { direction: 'top' },
         )
         .addTo(group)
@@ -126,82 +145,45 @@ function CrimeLayer({ points }) {
   return null
 }
 
-function PredictionLayer({ points }) {
+// Comunica el área visible y el zoom para consultar únicamente el riesgo correspondiente.
+function MapViewportReporter({ onBoundsChange }) {
   const map = useMap()
-  useEffect(() => {
-    if (!points?.length) return undefined
-    const renderer = L.canvas({ padding: 0.4 })
-    const group = L.layerGroup().addTo(map)
-    points.forEach((point) => {
-      const score = Number(point.risk_score)
-      const color = score >= 0.66 ? '#dc2626' : score >= 0.34 ? '#f59e0b' : '#16a34a'
-      L.circleMarker([point.lat, point.lng], {
-        renderer,
-        radius: score >= 0.66 ? 4.2 : 3,
-        color: '#ffffff',
-        fillColor: color,
-        weight: 0.8,
-        fillOpacity: 0.78,
-      })
-        .bindTooltip(
-          `<strong>Predicci&oacute;n XGBoost</strong><br>Riesgo: ${(score * 100).toFixed(1)}% (${point.risk_level})<br>Tramo: ${point.tramo_id}`,
-          { direction: 'top' },
-        )
-        .addTo(group)
-    })
-    return () => map.removeLayer(group)
-  }, [map, points])
-  return null
-}
-
-function PredictionVisualization({ heatmapPoints, predictionPoints, enabled }) {
-  const map = useMap()
-  const [zoom, setZoom] = useState(map.getZoom())
-  const [viewport, setViewport] = useState(() => {
+  const updateViewport = useCallback(() => {
     const bounds = map.getBounds()
-    return {
-      south: bounds.getSouth(),
-      west: bounds.getWest(),
-      north: bounds.getNorth(),
-      east: bounds.getEast(),
-    }
-  })
-  const updateViewport = () => {
-    const bounds = map.getBounds()
-    setViewport({
-      south: bounds.getSouth(),
-      west: bounds.getWest(),
-      north: bounds.getNorth(),
-      east: bounds.getEast(),
+    onBoundsChange({
+      bounds: [bounds.getSouth(), bounds.getWest(), bounds.getNorth(), bounds.getEast()],
+      zoom: Math.round(map.getZoom()),
     })
-  }
+  }, [map, onBoundsChange])
+  useEffect(() => { updateViewport() }, [updateViewport])
   useMapEvents({
     zoomend() {
-      setZoom(map.getZoom())
       updateViewport()
     },
     moveend() {
       updateViewport()
     },
   })
-  const visiblePredictionPoints = useMemo(
-    () =>
-      predictionPoints.filter(
-        (point) =>
-          point.lat >= viewport.south &&
-          point.lat <= viewport.north &&
-          point.lng >= viewport.west &&
-          point.lng <= viewport.east,
-      ),
-    [predictionPoints, viewport],
-  )
+  return null
+}
 
-  if (!enabled) return null
-  return zoom <= XGBOOST_HEAT_MAX_ZOOM ? (
-    <HeatLayer points={heatmapPoints} variant="predicted" />
-  ) : (
-    <PredictionLayer points={visiblePredictionPoints} />
-  )
+// Dibuja la geometría de las rutas con sus estilos y la información de riesgo de cada tramo.
+function RouteLines({ positions, segments, color, title, dashed, comparing, modelName }) {
+  if (positions.length < 2) return null
+  return <>
+    <Polyline positions={positions} pathOptions={{ color: '#ffffff', weight: dashed ? 7 : 10, opacity: .92, lineCap: 'round', lineJoin: 'round' }} interactive={false} />
+    <Polyline positions={positions} pathOptions={{ color, weight: dashed ? 4 : 7,
+      dashArray: dashed ? '10 8' : undefined, opacity: dashed ? .9 : 1, lineCap: 'round', lineJoin: 'round' }}
+      interactive={!segments.length}>{!segments.length && <Tooltip sticky>{title}</Tooltip>}</Polyline>
+    {segments.length ? segments.map((segment) => <Polyline key={`${segment.id_segmento}-${segment.orden}`}
+      positions={segment.positions} pathOptions={{ color, weight: 10, opacity: 0 }}>
+      <Tooltip sticky><strong>{title}</strong><br />
+        Mapa · máximo {(segment.riesgo_mapa_maximo * 100).toFixed(1)} / 100 · promedio {(segment.riesgo_segmento_normalizado * 100).toFixed(1)} / 100<br />
+        Rojo: {(segment.metros_rojos ?? 0).toFixed(0)} m · Naranja: {(segment.metros_naranjas ?? 0).toFixed(0)} m<br />
+        {modelName} · Mensual{segment.compartido && comparing ? ' · Tramo compartido' : ''}
+      </Tooltip>
+    </Polyline>) : null}
+  </>
 }
 
 function FilterSelect({ label, name, value, options, onChange }) {
@@ -219,37 +201,67 @@ function FilterSelect({ label, name, value, options, onChange }) {
   )
 }
 
+// Integra el mapa base, las capas de riesgo, las rutas y los controles de visualización.
 function MapView({
   mapCenter,
   selectionMode,
   onPick,
   origin,
   destination,
+  originLabel,
+  destinationLabel,
   heatmapPoints,
   crimePoints,
-  predictionHeatmapPoints,
-  predictionPoints,
+  predictionSurface,
   crimeTotal,
-  predictionTotal,
+  predictionAvailable,
+  predictionCounts,
+  onPredictionBoundsChange,
+  modelName,
   crimeFilters,
   filterOptions,
   mapLayers,
   mapDataLoading,
+  mapError,
   onFilterChange,
   onLayerChange,
   onResetFilters,
   safeRoutePositions,
   traditionalRoutePositions,
+  routePreference,
+  safeSegments,
+  traditionalSegments,
+  routeView,
+  routeFocusRequest,
+  sameRoute,
+  accessConnectors,
+  resultsOpen,
 }) {
   const [isDark, setIsDark] = useState(false)
   const [filtersOpen, setFiltersOpen] = useState(false)
+  const recommended = safeRoutePositions
+  const alternative = traditionalRoutePositions
+  const safeDetails = useMemo(() => (safeSegments ?? []).filter((segment) => segment.coordenadas?.length > 1)
+    .map((segment) => ({ ...segment, positions: segment.coordenadas.map((point) => [point.lat, point.lng]) })), [safeSegments])
+  const fastDetails = useMemo(() => (traditionalSegments ?? []).filter((segment) => segment.coordenadas?.length > 1)
+    .map((segment) => ({ ...segment, positions: segment.coordenadas.map((point) => [point.lat, point.lng]) })), [traditionalSegments])
+  const recommendedDetails = safeDetails
+  const alternativeDetails = fastDetails
+  const effectiveView = sameRoute ? 'both' : routeView
+  const showRecommended = effectiveView === 'both' || effectiveView === 'safe'
+  const showAlternative = !sameRoute && (effectiveView === 'both' || effectiveView === 'fast')
+  const fitPositions = useMemo(() => {
+    const positions = sameRoute ? safeRoutePositions : routeView === 'safe' ? safeRoutePositions
+      : routeView === 'fast' ? traditionalRoutePositions : [...safeRoutePositions, ...traditionalRoutePositions]
+    return positions.length > 1 ? [...(origin ? [origin] : []), ...positions, ...(destination ? [destination] : [])] : []
+  }, [safeRoutePositions, traditionalRoutePositions, routeView, sameRoute, origin?.[0], origin?.[1], destination?.[0], destination?.[1]])
   const originIcon = useMemo(
     () =>
       L.divIcon({
         className: 'pin-icon pin-icon--green',
-        html: '<div class="pin-inner"></div>',
-        iconSize: [24, 24],
-        iconAnchor: [12, 24],
+        html: '<svg viewBox="0 0 32 42" aria-hidden="true"><path d="M16 40S2 24 2 16a14 14 0 0 1 28 0c0 8-14 24-14 24Z" fill="#22c55e" stroke="white" stroke-width="3"/><circle cx="16" cy="16" r="5" fill="white"/></svg>',
+        iconSize: [32, 42],
+        iconAnchor: [16, 40],
       }),
     [],
   )
@@ -257,69 +269,55 @@ function MapView({
     () =>
       L.divIcon({
         className: 'pin-icon pin-icon--red',
-        html: '<div class="pin-inner"></div>',
-        iconSize: [24, 24],
-        iconAnchor: [12, 24],
+        html: '<svg viewBox="0 0 32 42" aria-hidden="true"><path d="M16 40S2 24 2 16a14 14 0 0 1 28 0c0 8-14 24-14 24Z" fill="#ef4444" stroke="white" stroke-width="3"/><circle cx="16" cy="16" r="5" fill="white"/></svg>',
+        iconSize: [32, 42],
+        iconAnchor: [16, 40],
       }),
     [],
   )
 
   return (
-    <div className={`map-wrapper ${selectionMode ? 'is-selecting' : ''}`}>
+    <div className={`map-wrapper ${selectionMode ? 'is-selecting' : ''} ${isDark ? 'map-wrapper--dark' : ''}`}>
       <MapContainer
         center={mapCenter}
         zoom={13}
+        maxZoom={18}
         className="map"
         zoomControl={false}
         preferCanvas
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url={isDark ? darkTiles : lightTiles}
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url={baseTiles}
+          maxZoom={19}
         />
         <MapCenterUpdater center={mapCenter} />
+        <ZoomControl position="topleft" />
         <MapSizeFixer />
         <MapClickPicker selectionMode={selectionMode} onPick={onPick} />
         <HeatLayer points={heatmapPoints} variant="historical" />
         <CrimeLayer points={crimePoints} />
-        <PredictionVisualization
-          heatmapPoints={predictionHeatmapPoints}
-          predictionPoints={predictionPoints}
-          enabled={mapLayers.predictionHeatmap}
-        />
+        <MapViewportReporter onBoundsChange={onPredictionBoundsChange} />
+        <Pane name="risk-heatmap" style={{ zIndex: 410, pointerEvents: 'none' }}>
+          <RiskSurfaceLayer surface={predictionSurface} enabled={mapLayers.predictionHeatmap} />
+        </Pane>
 
-        {origin && <Marker position={origin} icon={originIcon} />}
-        {destination && <Marker position={destination} icon={destinationIcon} />}
-        {traditionalRoutePositions.length > 1 && (
-          <>
-            <Polyline
-              positions={traditionalRoutePositions}
-              pathOptions={{ color: '#ffffff', weight: 7, opacity: 0.85 }}
-            />
-            <Polyline
-              positions={traditionalRoutePositions}
-              pathOptions={{
-                color: '#334155',
-                weight: 4,
-                opacity: 0.95,
-                dashArray: '9 7',
-              }}
-            />
-          </>
-        )}
-        {safeRoutePositions.length > 1 && (
-          <>
-            <Polyline
-              positions={safeRoutePositions}
-              pathOptions={{ color: '#ffffff', weight: 8, opacity: 0.92 }}
-            />
-            <Polyline
-              positions={safeRoutePositions}
-              pathOptions={{ color: '#0284c7', weight: 5, opacity: 1 }}
-            />
-            <FitRoute route={safeRoutePositions} />
-          </>
-        )}
+        {origin && <Marker position={origin} icon={originIcon}><Tooltip permanent direction="right" offset={[13, -22]} className="endpoint-label"><strong>Inicio</strong><span>{originLabel || 'Punto de partida'}</span></Tooltip></Marker>}
+        {destination && <Marker position={destination} icon={destinationIcon}><Tooltip permanent direction="right" offset={[13, -22]} className="endpoint-label"><strong>Destino</strong><span>{destinationLabel || 'Punto de llegada'}</span></Tooltip></Marker>}
+        <Pane name="alternative-route" style={{ zIndex: 440 }}>
+          {showAlternative && <RouteLines positions={alternative} segments={alternativeDetails} color={ALTERNATIVE_COLOR}
+            title="Ruta alternativa · Más corta" dashed comparing={showRecommended} modelName={modelName} />}
+        </Pane>
+        <Pane name="recommended-route" style={{ zIndex: 450 }}>
+          {showRecommended && <RouteLines positions={recommended} segments={recommendedDetails} color={ROUTE_COLOR}
+            title="Ruta recomendada · Menor riesgo" dashed={false} comparing={showAlternative} modelName={modelName} />}
+          {(accessConnectors ?? []).map((connection, index) => <Polyline key={`access-${index}`}
+            positions={connection.map((point) => [point.lat, point.lng])}
+            pathOptions={{ color: '#64748b', weight: 3, dashArray: '3 6' }}>
+            <Tooltip sticky>Acceso a la red vial · Riesgo no evaluado</Tooltip>
+          </Polyline>)}
+        </Pane>
+        <FitRoute route={fitPositions} resultsOpen={resultsOpen} focusRequest={routeFocusRequest} />
       </MapContainer>
 
       {selectionMode && (
@@ -335,6 +333,8 @@ function MapView({
           className={filtersOpen ? 'map-control-button is-active' : 'map-control-button'}
           onClick={() => setFiltersOpen((current) => !current)}
           aria-label="Mostrar filtros del mapa"
+          aria-expanded={filtersOpen}
+          aria-controls="map-filters"
         >
           <Filter size={17} />
         </button>
@@ -348,8 +348,14 @@ function MapView({
         </button>
       </div>
 
+      {!filtersOpen && (mapError || (mapDataLoading && mapLayers.predictionHeatmap && !predictionSurface)) && (
+        <div className="map-data-message" role="status">
+          {mapError || `Cargando riesgo mensual de ${modelName}…`}
+        </div>
+      )}
+
       {filtersOpen && (
-        <aside className="map-filter-panel">
+        <aside className="map-filter-panel" id="map-filters" aria-label="Capas y filtros del mapa">
           <div className="map-filter-header">
             <div>
               <span>Capas de riesgo</span>
@@ -363,7 +369,7 @@ function MapView({
                           ? `Histórico: ${heatmapPoints.length.toLocaleString('es-PE')} zonas`
                           : null,
                         mapLayers.predictionHeatmap
-                          ? `XGBoost: ${predictionHeatmapPoints.length.toLocaleString('es-PE')} zonas · ${predictionTotal.toLocaleString('es-PE')} tramos`
+                          ? `${modelName}: ${predictionAvailable.toLocaleString('es-PE')} tramos en esta vista`
                           : null,
                         mapLayers.crimes
                           ? `${crimeTotal.toLocaleString('es-PE')} delitos`
@@ -403,10 +409,12 @@ function MapView({
                   onLayerChange('predictionHeatmap', event.target.checked)
                 }
               />
-              <BrainCircuit size={14} /> Mapa predictivo XGBoost
+              <BrainCircuit size={14} /> Mapa de calor predictivo · {modelName}
             </label>
           </div>
 
+          <details className="historical-filters">
+            <summary>Filtros del histórico</summary>
           <FilterSelect
             label="Día de la semana"
             name="dia_semana"
@@ -438,14 +446,22 @@ function MapView({
           <button type="button" className="reset-filter-button" onClick={onResetFilters}>
             <RotateCcw size={14} /> Restablecer filtros
           </button>
+          </details>
           <p className="filter-note">
-            El calor histórico responde a los filtros. XGBoost muestra concentraciones de riesgo
-            alto en la vista general y los tramos prioritarios al acercar el mapa.
+            El ruteo utiliza el riesgo mensual del modelo seleccionado. Los filtros del histórico solo modifican esas capas.
           </p>
+          {mapError && <p className="filter-note" role="status">{mapError}</p>}
+          {mapLayers.predictionHeatmap && <div className="prediction-counts">
+            <strong>Tramos en esta vista</strong>
+            {Object.entries(RISK_LEVELS).map(([key, level]) => <span key={key}>
+              <i style={{ background: level.color }} />{level.label}: {predictionCounts[key].toLocaleString('es-PE')}
+            </span>)}
+            <small>El calor agrupa focos cercanos y destaca los scores más elevados. El ruteo evalúa todos los tramos, incluidos los que no destacan en esta capa.</small>
+          </div>}
         </aside>
       )}
 
-      {(mapLayers.heatmap || mapLayers.predictionHeatmap) && (
+      {!filtersOpen && (mapLayers.heatmap || mapLayers.predictionHeatmap || recommended.length > 1) && (
         <div className="heatmap-legends">
           {mapLayers.heatmap && (
             <div className="heatmap-legend">
@@ -460,14 +476,18 @@ function MapView({
           )}
           {mapLayers.predictionHeatmap && (
             <div className="heatmap-legend">
-              <strong>Riesgo alto predicho por XGBoost</strong>
-              <div className="heatmap-gradient heatmap-gradient--predicted" />
-              <div>
-                <span>Menor concentración</span>
-                <span>Mayor concentración</span>
+              <strong>Nivel de riesgo en la zona</strong>
+              <div className="street-risk-gradient" />
+              <div className="street-risk-labels">
+                <span>Muy bajo</span><span>Bajo</span><span>Medio</span><span>Alto</span><span>Muy alto</span>
               </div>
+              <small className="surface-note">{modelName} · Focos de mayor riesgo. Sin color no implica riesgo nulo.</small>
             </div>
           )}
+          {recommended.length > 1 && <div className="heatmap-legend route-legend">
+            {showRecommended && <span><i className="legend-route-line" />Ruta recomendada · Menor riesgo</span>}
+            {showAlternative && <span><i className="legend-route-line alternative" />Ruta alternativa · Más corta</span>}
+          </div>}
         </div>
       )}
     </div>

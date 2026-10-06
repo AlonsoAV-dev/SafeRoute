@@ -1,0 +1,4 @@
+# El entrenamiento y la exportación de LSTM requieren PyTorch.
+# La API consulta predicciones CSV y utiliza las dependencias de requirements.txt.
+-r requirements.txt
+torch

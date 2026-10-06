@@ -6,6 +6,7 @@ from math import ceil, cos, radians
 from pathlib import Path
 from time import perf_counter
 from typing import Callable
+from weakref import WeakKeyDictionary
 
 import networkx as nx
 import numpy as np
@@ -19,20 +20,28 @@ from app.services.risk_model import (
     level_from_score,
 )
 from app.services.segmentos import construir_id_segmento
+from app.services.alternative_routes import route_signature, search_alternatives
+from app.services.hotspot_routing import (
+    assign_heatmap_scores, choose_avoidance_graph, crossing_reasons, field_edge_cost,
+    RED_PENALTY, ORANGE_PENALTY,
+)
 
 
-LOGGER = logging.getLogger("saferoute.routing")
+LOGGER = logging.getLogger("uvicorn.error")
 LOGGER.setLevel(logging.INFO)
+# Establece las penalizaciones exploradas, el límite de desvío y la velocidad estimada.
 BETA_VALUES = (1, 3, 5, 10, 20, 50, 100)
 MAX_SAFE_DISTANCE_FACTOR = 1.50
 MIN_RISK_REDUCTION_PERCENT = 0.50
 DEFAULT_SPEED_KMH = 25
+HOTSPOT_PENALTY_WEIGHT = 2.0
 HISTORICAL_RISK_WEIGHT = 0.70
 PREDICTED_RISK_WEIGHT = 0.30
 EARTH_RADIUS_M = 6_371_000
 ROAD_GRAPH_PATH = Path(__file__).resolve().parents[2] / "data" / "red_vial_lima.graphml"
 
 
+# Compara la ruta de menor distancia con alternativas evaluadas sobre la misma red vial.
 def generate_route_comparison(
     origin: tuple[float, float],
     destination: tuple[float, float],
@@ -41,19 +50,25 @@ def generate_route_comparison(
     beta: float = 10,
     buffer_m: int = 200,
     risk_mode: str = "predicted",
+    turno: str | None = None,
 ) -> dict:
     started_at = perf_counter()
     model_used = risk_model.resolve_model(modelo_riesgo)
+    info_provider = getattr(risk_model, "model_info", None)
+    model_details = info_provider(modelo_riesgo) if callable(info_provider) else {
+        "prediction_period": risk_model.prediction_period,
+        "supports_turns": False, "unit": "segmento",
+    }
     try:
         graph, start_node, end_node, node_to_latlng = _build_osm_graph_base(
             origin, destination
         )
         graph_source = "OpenStreetMap local"
-    except (nx.NetworkXException, ValueError, RuntimeError, OSError):
-        graph, start_node, end_node, node_to_latlng = _build_grid_graph_base(
-            origin, destination
-        )
-        graph_source = "grilla local"
+    except (nx.NetworkXException, ValueError, RuntimeError, OSError) as error:
+        raise ValueError(
+            "No se pudo encontrar una ruta conectada en la red vial local. "
+            "Selecciona puntos cercanos a calles dentro de Lima Metropolitana."
+        ) from error
     graph_ready_at = perf_counter()
 
     risk_summary = _assign_segment_risks(
@@ -63,78 +78,133 @@ def generate_route_comparison(
         buffer_m,
         risk_mode,
         modelo_riesgo,
+        turno,
     )
+    # En el modo mensual asigna a las calles el mismo campo de riesgo que representa el mapa.
+    field_info = None
+    if risk_mode == "predicted" and turno is None:
+        field_info = assign_heatmap_scores(graph, node_to_latlng,
+            risk_model.spatial_risk_surface(), modelo_riesgo,
+            [origin, destination, node_to_latlng(start_node), node_to_latlng(end_node)])
+        field_scores = [data["risk_segment_normalized"] for _, _, _, data in _iter_edges(graph)]
+        risk_summary.update(min=min(field_scores, default=0), max=max(field_scores, default=0),
+                            p95=float(np.percentile(field_scores, 95)) if field_scores else 0)
     risks_ready_at = perf_counter()
-    fast_path = _compute_path(
-        graph, start_node, end_node, node_to_latlng, "cost_fast"
-    )
-    fast_route = _route_metrics(
-        graph,
-        fast_path,
-        origin,
-        destination,
-        node_to_latlng,
-        "cost_fast",
-    )
+    path_cache = WeakKeyDictionary()
+    summary_cache = {}
 
-    beta_diagnostics = []
-    safe_candidates = []
-    tested_betas = sorted({*BETA_VALUES, float(beta)})
-    for tested_beta in tested_betas:
-        _set_safe_cost(graph, tested_beta)
-        path = _compute_path(
-            graph, start_node, end_node, node_to_latlng, "cost_safe"
-        )
-        route = _route_metrics(
-            graph,
-            path,
-            origin,
-            destination,
-            node_to_latlng,
-            "cost_safe",
-        )
-        reduction = _risk_reduction(
-            fast_route["risk_total"], route["risk_total"]
-        )
-        geometry_changed = route["node_path"] != fast_route["node_path"]
-        diagnostic = {
-            "beta": tested_beta,
-            "distance_km": route["distance_km"],
-            "risk_total": route["risk_total"],
-            "risk_average": route["risk_score"],
-            "risk_reduction": reduction,
-            "geometry_changed": geometry_changed,
-        }
-        beta_diagnostics.append(diagnostic)
-        safe_candidates.append((tested_beta, route, reduction))
+    def solve(target, weight):
+        field_cost = bool(target.graph.get("risk_field_version"))
+        if weight == "cost_safe":
+            key = ("field_cost" if field_cost else "cost_safe", target.graph["safe_beta"])
+        elif weight == "cost_hotspot" and field_cost:
+            key = ("field_cost", 10)
+        else:
+            key = weight
+        cached = path_cache.setdefault(target, {})
+        if key not in cached:
+            cached[key] = _compute_path(target, start_node, end_node, node_to_latlng, weight)
+        return cached[key]
 
-    alternatives = [
-        candidate
-        for candidate in safe_candidates
-        if candidate[2] >= MIN_RISK_REDUCTION_PERCENT
-        and candidate[1]["node_path"] != fast_route["node_path"]
-        and candidate[1]["distance_km"]
-        <= fast_route["distance_km"] * MAX_SAFE_DISTANCE_FACTOR
-    ]
+    def summarize(target, path, weight):
+        key = tuple((u, v, _best_edge_data(target, u, v, weight).get("edge_key", "0"))
+                    for u, v in zip(path, path[1:]))
+        if key not in summary_cache:
+            summary_cache[key] = _route_metrics(target, path, origin, destination, node_to_latlng, weight)
+        return summary_cache[key]
+
+    # Calcula la referencia por distancia y fija el presupuesto máximo para las alternativas.
+    fast_path = solve(graph, "cost_fast")
+    fast_route = summarize(graph, fast_path, "cost_fast")
+
+    distance_limit_km = fast_route["distance_km"] * MAX_SAFE_DISTANCE_FACTOR
+    avoidance_policy = None
+    search_graph, reference_path, reference_route = graph, fast_path, fast_route
+    if field_info is not None:
+        search_graph, reference_path, reference_route, avoidance_policy = choose_avoidance_graph(
+            graph, solve=solve, summarize=summarize, distance_limit_km=distance_limit_km,
+            endpoint_info=field_info)
+
+    safe_candidates, beta_diagnostics = search_alternatives(
+        search_graph, reference_path, reference_route,
+        solve=solve,
+        summarize=summarize,
+        configure_beta=lambda value: _set_safe_cost(search_graph, value),
+        beta_values=BETA_VALUES, requested_beta=beta,
+        distance_limit_km=distance_limit_km,
+    )
+    if field_info is not None:
+        safe_candidates.append({"beta": 0, "strategy": "menor_distancia_del_grafo_admisible",
+                                "route": reference_route, "weight": "cost_fast"})
+    fast_signature = route_signature(fast_route)
+    alternatives = []
+    rejected = {"mismo_recorrido": 0, "desvio_excesivo": 0, "mejora_insuficiente": 0}
+    for candidate in safe_candidates:
+        candidate["reduction"] = _risk_reduction(fast_route["risk_total"], candidate["route"]["risk_total"])
+        if candidate["route"]["distance_km"] > distance_limit_km + 1e-9:
+            rejected["desvio_excesivo"] += 1
+        elif field_info is not None:
+            # La prioridad es no atravesar rojo/naranja. Un desvío puede ser
+            # válido aunque su exposición lineal o su distancia sean mayores.
+            alternatives.append(candidate)
+        elif route_signature(candidate["route"]) == fast_signature:
+            rejected["mismo_recorrido"] += 1
+        elif candidate["route"]["distance_km"] > fast_route["distance_km"] * MAX_SAFE_DISTANCE_FACTOR:
+            rejected["desvio_excesivo"] += 1
+        elif candidate["reduction"] < MIN_RISK_REDUCTION_PERCENT:
+            rejected["mejora_insuficiente"] += 1
+        else:
+            alternatives.append(candidate)
+    # Selecciona una alternativa priorizando los cruces de riesgo y la exposición dentro del desvío permitido.
     if alternatives:
-        safe_beta, safe_route, reduction = max(
+        selected = max(
             alternatives,
-            key=lambda candidate: (
-                candidate[2],
-                -candidate[1]["distance_km"],
+            key=(lambda candidate: (
+                -candidate["route"].get("red_avoidable_m", 0),
+                -candidate["route"].get("orange_avoidable_m", 0),
+                -candidate["route"].get("red_distance_m", 0),
+                -candidate["route"].get("orange_distance_m", 0),
+                -candidate["route"]["risk_total"],
+                -candidate["route"]["distance_km"],
+            )) if field_info is not None else lambda candidate: (
+                -candidate["route"]["risk_distance_by_level_m"]["alto"],
+                candidate["reduction"],
+                -candidate["route"]["distance_km"],
             ),
         )
+        safe_beta, safe_route, reduction = selected["beta"], selected["route"], selected["reduction"]
+        selected_strategy = selected["strategy"]
+        selected_weight = selected["weight"]
     else:
         safe_beta = 0
         safe_route = fast_route
         reduction = 0.0
+        selected_strategy = "recorrido_base"
+        selected_weight = "cost_fast"
 
-    same_route = safe_route["node_path"] == fast_route["node_path"]
-    if same_route:
-        message = (
-            "La ruta segura coincide con la ruta más rápida porque no se encontró "
-            "una alternativa con menor riesgo significativo."
+    selected_formula = (
+        "distancia_m * (riesgo + 2 * max(0, (riesgo - 0.66) / 0.34)^2 + 0.25 * indicador_alto)"
+        if selected_weight == "cost_hotspot" else
+        "distancia_m * riesgo_segmento_normalizado" if safe_beta is None else
+        "distancia_m * (1 + beta * riesgo_segmento_normalizado)"
+    )
+    if field_info is not None:
+        selected_formula = (
+            "distancia_m * (1 + beta * RISK_SCORE_medio_del_heatmap) + 200 * metros_rojos + 20 * metros_naranjas"
+            if selected_weight not in {"cost_fast", "cost_exposure"} else
+            "distancia_m" if selected_weight == "cost_fast" else
+            "integral_vial_del_RISK_SCORE_del_heatmap"
         )
+
+    same_route = route_signature(safe_route) == fast_signature
+    if same_route:
+        minimum_coincides = any(item["strategy"] == "minima_exposicion" and not item["geometry_changed"] for item in beta_diagnostics)
+        if minimum_coincides:
+            message = "El recorrido de menor distancia también minimiza la exposición estimada en la red evaluada."
+        elif rejected["desvio_excesivo"] and not rejected["mejora_insuficiente"]:
+            message = "Las alternativas encontradas superan el desvío permitido de 50 %. Los recorridos recomendados coinciden."
+        else:
+            message = "Las alternativas evaluadas dentro del desvío de 50 % no reducen la exposición al menos 0,5 %. Los recorridos coinciden."
         reduction = 0.0 if same_route else reduction
     else:
         distance_delta = safe_route["distance_km"] - fast_route["distance_km"]
@@ -142,19 +212,27 @@ def generate_route_comparison(
             f"La ruta segura reduce la exposición estimada en {reduction:.2f}% "
             f"con una variación de distancia de {distance_delta:+.2f} km."
         )
+    if avoidance_policy is not None:
+        exceptions = crossing_reasons(safe_route, avoidance_policy)
+        avoidance_policy["crossing_reasons"] = exceptions
+        avoidance_policy["red_distance_m"] = safe_route.get("red_distance_m", 0)
+        avoidance_policy["orange_distance_m"] = safe_route.get("orange_distance_m", 0)
+        message = ("La ruta recomendada evita los centros rojos del heatmap." if safe_route.get("red_distance_m", 0) < 0.01
+                   else " ".join(exceptions))
+        if same_route:
+            message += " La ruta más corta coincide con el recorrido recomendado bajo este criterio."
 
-    alternative_count = len(
-        {
-            tuple(route["node_path"])
-            for _, route, _ in safe_candidates
-        }
-        | {tuple(fast_route["node_path"])}
-    )
+    alternative_count = len({route_signature(candidate["route"]) for candidate in safe_candidates} | {fast_signature})
+    shared_ids = {segment["id_segmento"] for segment in safe_route["segments"]} & {segment["id_segmento"] for segment in fast_route["segments"]}
+    for route in (safe_route, fast_route):
+        for segment in route["segments"]:
+            segment["compartido"] = segment["id_segmento"] in shared_ids
+    shared_distance = sum(segment["distancia_metros"] for segment in safe_route["segments"] if segment["compartido"])
     paths_ready_at = perf_counter()
     LOGGER.info(
         "route_comparison source=%s alternatives=%s model=%s buffer=%sm "
         "beta=%s fast_risk=%.4f safe_risk=%.4f fast_high=%s safe_high=%s "
-        "formula=distance_m*(1+beta*risk_norm) risk_min=%.4f risk_p95=%.4f "
+        "formula=%s risk_min=%.4f risk_p95=%.4f "
         "risk_max=%.4f",
         graph_source,
         alternative_count,
@@ -165,6 +243,7 @@ def generate_route_comparison(
         safe_route["risk_total"],
         fast_route["high_risk_segments"],
         safe_route["high_risk_segments"],
+        selected_formula,
         risk_summary["min"],
         risk_summary["p95"],
         risk_summary["max"],
@@ -172,6 +251,7 @@ def generate_route_comparison(
 
     for route in (safe_route, fast_route):
         route.pop("node_path", None)
+        route.pop("edge_path", None)
 
     return {
         "safe_route": safe_route,
@@ -181,13 +261,17 @@ def generate_route_comparison(
         "risk_reduction": round(reduction, 2),
         "reduccion_riesgo": round(reduction, 2),
         "misma_ruta": same_route,
+        "distancia_compartida_m": round(shared_distance, 2),
+        "estrategia_seleccionada": selected_strategy,
         "modelo_riesgo_solicitado": modelo_riesgo,
         "modelo_usado": model_used,
         "modo_riesgo": risk_mode,
-        "periodo_prediccion": risk_model.prediction_period,
+        "turno_riesgo": turno if model_details["supports_turns"] else None,
+        "periodo_prediccion": model_details["prediction_period"],
+        "unidad_prediccion": "segmento × mes × turno" if turno and model_details["supports_turns"] else "segmento × mes",
         "metricas_modelo": risk_model.metrics_for_model(modelo_riesgo),
         "parametros_a_star": {
-            "alpha": 1,
+            "alpha": 0 if safe_beta is None else 1,
             "beta_ruta_rapida": 0,
             "beta_ruta_segura": safe_beta,
             "buffer_m": buffer_m,
@@ -204,9 +288,20 @@ def generate_route_comparison(
             "desvio_maximo_porcentaje": round(
                 (MAX_SAFE_DISTANCE_FACTOR - 1) * 100, 1
             ),
-            "formula": "distancia_m * (1 + beta * riesgo_segmento_normalizado)",
+            "formula": selected_formula,
+            "criterio_seleccion": "evitar rojo, después naranja, luego exposición y distancia; desvío máximo de 50 %" if field_info else
+                                  "menor distancia en riesgo alto entre rutas con menor exposición y desvío máximo de 50 %",
+            "penalizacion_rojo": RED_PENALTY if field_info else None,
+            "penalizacion_naranja": ORANGE_PENALTY if field_info else None,
         },
+        "risk_field": field_info["field"] if field_info else None,
+        "hotspot_policy": avoidance_policy,
         "diagnostico_beta": beta_diagnostics,
+        "diagnostico_busqueda": {
+            "intentos_con_ruta": len(beta_diagnostics), "recorridos_distintos": alternative_count,
+            "alternativas_aceptables": len(alternatives), "descartes": rejected,
+            "busqueda_exhaustiva": False,
+        },
         "diagnostico_grafo": {
             "fuente": graph_source,
             "alternativas_encontradas": alternative_count,
@@ -237,16 +332,18 @@ def generate_safe_route(
     safety_weight: float,
     alpha: float | None = None,
 ) -> dict:
-    del turno, safety_weight
+    del safety_weight
     comparison = generate_route_comparison(
         origin=origin,
         destination=destination,
         risk_model=risk_model,
         beta=10 if alpha is None else max(0, min(20, alpha * 20)),
+        turno=turno,
     )
     return comparison["safe_route"]
 
 
+# Extrae la red necesaria para el recorrido y asocia sus extremos con los nodos viales cercanos.
 def _build_osm_graph_base(
     origin: tuple[float, float],
     destination: tuple[float, float],
@@ -260,41 +357,44 @@ def _build_osm_graph_base(
         raise ValueError("Los puntos están fuera de la red vial local.")
     start_node = node_ids[int(indices[0][0])]
     end_node = node_ids[int(indices[1][0])]
-    mid_lat = (origin[0] + destination[0]) / 2
-    straight_distance = haversine_m(
-        origin[0], origin[1], destination[0], destination[1]
-    )
-    base_padding = min(2_000.0, max(750.0, straight_distance * 0.10 + 500.0))
-    graph = None
-    for multiplier in (1.0, 1.75, 3.0):
-        padding_m = base_padding * multiplier
-        lat_padding = padding_m / 111_320.0
-        lng_padding = padding_m / (111_320.0 * cos(radians(mid_lat)))
-        selected = np.flatnonzero(
-            (coordinates[:, 0] >= min(origin[0], destination[0]) - lat_padding)
-            & (coordinates[:, 0] <= max(origin[0], destination[0]) + lat_padding)
-            & (coordinates[:, 1] >= min(origin[1], destination[1]) - lng_padding)
-            & (coordinates[:, 1] <= max(origin[1], destination[1]) + lng_padding)
-        )
-        candidate = base_graph.subgraph([node_ids[index] for index in selected]).copy()
-        if (
-            start_node in candidate
-            and end_node in candidate
-            and nx.has_path(candidate, start_node, end_node)
-        ):
-            graph = candidate
-            break
-    if graph is None:
-        raise nx.NetworkXNoPath("No existe un corredor vial local entre los puntos.")
+    def base_node_to_latlng(node: int) -> tuple[float, float]:
+        return float(base_graph.nodes[node]["y"]), float(base_graph.nodes[node]["x"])
+
+    shortest_path = _compute_path(base_graph, start_node, end_node, base_node_to_latlng, "length")
+    shortest_length = sum(float(_best_edge_data(base_graph, u, v, "length")["length"])
+                          for u, v in zip(shortest_path, shortest_path[1:]))
+    access_length = haversine_m(*origin, *base_node_to_latlng(start_node)) + haversine_m(*base_node_to_latlng(end_node), *destination)
+    road_budget = MAX_SAFE_DISTANCE_FACTOR * (shortest_length + access_length) - access_length
+    # Todo nodo de una alternativa admisible cumple esta cota por distancia.
+    # Así no se recorta el grafo solo porque ya existe una conexión directa.
+    destination_distances = _distances_to_point_m(coordinates, base_node_to_latlng(end_node))
+    lower_bound = _distances_to_point_m(coordinates, base_node_to_latlng(start_node)) + destination_distances
+    selected = np.flatnonzero(lower_bound <= road_budget + 1.0)
+    selected_nodes = {node_ids[index] for index in selected} | set(shortest_path)
+    graph = base_graph.subgraph(selected_nodes).copy()
 
     def node_to_latlng(node: int) -> tuple[float, float]:
         data = graph.nodes[node]
         return float(data["y"]), float(data["x"])
 
+    node_to_latlng.route_destination = end_node
+    node_to_latlng.destination_distances = {node_ids[index]: float(destination_distances[index]) for index in selected}
+    for node in shortest_path:
+        if node not in node_to_latlng.destination_distances:
+            node_to_latlng.destination_distances[node] = haversine_m(*node_to_latlng(node), *node_to_latlng(end_node))
+
     return graph, start_node, end_node, node_to_latlng
 
 
+def _distances_to_point_m(coordinates: np.ndarray, point: tuple[float, float]) -> np.ndarray:
+    latitudes, longitudes = np.radians(coordinates).T
+    latitude, longitude = np.radians(point)
+    value = np.sin((latitudes - latitude) / 2) ** 2 + np.cos(latitude) * np.cos(latitudes) * np.sin((longitudes - longitude) / 2) ** 2
+    return 2 * EARTH_RADIUS_M * np.arcsin(np.sqrt(np.clip(value, 0.0, 1.0)))
+
+
 @lru_cache(maxsize=1)
+# Carga y conserva en memoria la red local y el índice utilizado para localizar nodos.
 def _load_local_road_network() -> tuple[
     nx.MultiDiGraph,
     tuple[int, ...],
@@ -388,6 +488,7 @@ def _build_grid_graph_base(
     return graph, start_node, end_node, lambda node: node
 
 
+# Anota en cada arista el riesgo predicho, histórico o combinado y los costos correspondientes.
 def _assign_segment_risks(
     graph,
     node_to_latlng,
@@ -395,11 +496,14 @@ def _assign_segment_risks(
     buffer_m: int,
     risk_mode: str,
     modelo_riesgo: str,
+    turno: str | None = None,
 ) -> dict:
     if risk_mode not in {"predicted", "historical", "hybrid"}:
         raise ValueError(f"Modo de riesgo no soportado: {risk_mode}")
     needs_historical = risk_mode in {"historical", "hybrid"}
     needs_prediction = risk_mode in {"predicted", "hybrid"}
+    prediction_lookup = (risk_model.segment_predictions(modelo_riesgo, turno)
+                         if needs_prediction and hasattr(risk_model, "segment_predictions") else {})
     edge_rows = []
     for u, v, key, data in _iter_edges(graph):
         start = node_to_latlng(u)
@@ -407,9 +511,11 @@ def _assign_segment_risks(
         midpoint = ((start[0] + end[0]) / 2, (start[1] + end[1]) / 2)
         length = float(data.get("length") or haversine_m(*start, *end))
         crime_stats = (
-            risk_model.nearby_crime_stats(
+            _nearby_stats_with_turno(
+                risk_model,
                 _edge_sample_points(data, start, end),
                 buffer_m,
+                turno,
             )
             if needs_historical
             else {"count": 0, "weight_sum": 0.0, "weight_avg": 0.0}
@@ -417,7 +523,7 @@ def _assign_segment_risks(
         raw_risk = crime_stats["weight_sum"] / max(length / 100, 1)
         tramo_id = construir_id_segmento(u, v, key, data)
         prediction = (
-            _predict_segment_with_model(risk_model, tramo_id, midpoint, modelo_riesgo)
+            (prediction_lookup.get(tramo_id) or _predict_segment_with_model(risk_model, tramo_id, midpoint, modelo_riesgo, turno))
             if needs_prediction
             else RiskPrediction(score=0.0, level="bajo")
         )
@@ -463,6 +569,7 @@ def _assign_segment_risks(
         data.update(
             {
                 "id_segmento": row["tramo_id"],
+                "edge_key": str(row["key"]),
                 "distance_m": row["length"],
                 "time_min": row["length"] / (DEFAULT_SPEED_KMH * 1000 / 60),
                 "nearby_crime_count": row["crime_stats"]["count"],
@@ -472,8 +579,17 @@ def _assign_segment_risks(
                 "risk_historical_normalized": historical,
                 "risk_predicted": predicted,
                 "risk_segment_normalized": normalized,
-                "risk_level": level_from_score(normalized),
+                "risk_level": (
+                    row["prediction"].level
+                    if risk_mode == "predicted"
+                    else level_from_score(normalized)
+                ),
                 "cost_fast": row["length"],
+                "cost_exposure": row["length"] * normalized,
+                "cost_hotspot": row["length"] * (
+                    normalized + HOTSPOT_PENALTY_WEIGHT * (max(0.0, (normalized - 0.66) / 0.34) ** 2)
+                    + (0.25 if (row["prediction"].level if risk_mode == "predicted" else level_from_score(normalized)) == "alto" else 0.0)
+                ),
             }
         )
     _set_safe_cost(graph, 10)
@@ -491,11 +607,29 @@ def _predict_segment_with_model(
     tramo_id: str,
     midpoint: tuple[float, float],
     modelo_riesgo: str,
+    turno: str | None = None,
 ) -> RiskPrediction:
     try:
-        return risk_model.predict_segment(tramo_id, midpoint, modelo_riesgo)
+        return risk_model.predict_segment(tramo_id, midpoint, modelo_riesgo, turno=turno)
     except TypeError:
-        return risk_model.predict_segment(tramo_id, midpoint)
+        try:
+            return risk_model.predict_segment(tramo_id, midpoint, modelo_riesgo)
+        except TypeError:
+            return risk_model.predict_segment(tramo_id, midpoint)
+
+
+def _nearby_stats_with_turno(
+    risk_model: RiskModel,
+    points: list[tuple[float, float]],
+    radius_m: float,
+    turno: str | None,
+) -> dict:
+    if turno:
+        try:
+            return risk_model.nearby_crime_stats(points, radius_m, turno=turno)
+        except TypeError:
+            pass
+    return risk_model.nearby_crime_stats(points, radius_m)
 
 
 def _edge_sample_points(data, start, end) -> list[tuple[float, float]]:
@@ -514,9 +648,11 @@ def _edge_sample_points(data, start, end) -> list[tuple[float, float]]:
     ]
 
 
+# Actualiza el costo de búsqueda para la penalización de riesgo solicitada.
 def _set_safe_cost(graph, beta: float) -> None:
+    graph.graph["safe_beta"] = beta
     for _, _, _, data in _iter_edges(graph):
-        data["cost_safe"] = _edge_cost(
+        data["cost_safe"] = field_edge_cost(data, beta) if data.get("risk_field_version") else _edge_cost(
             float(data["distance_m"]),
             float(data["risk_segment_normalized"]),
             beta,
@@ -527,21 +663,27 @@ def _edge_cost(distance_m: float, risk_score: float, beta: float) -> float:
     return distance_m * (1 + beta * risk_score)
 
 
+# Ejecuta A* con una heurística de distancia y el costo seleccionado para cada arista.
 def _compute_path(graph, start_node, end_node, node_to_latlng, weight):
+    use_distance = weight != "cost_exposure" and (weight != "cost_hotspot" or graph.graph.get("risk_field_version"))
+    distances = (getattr(node_to_latlng, "destination_distances", None)
+                 if getattr(node_to_latlng, "route_destination", None) == end_node else None)
+    if not use_distance:
+        heuristic = lambda a, b: 0.0
+    elif distances is not None:
+        heuristic = lambda a, b: distances[a]
+    else:
+        heuristic = lambda a, b: haversine_m(*node_to_latlng(a), *node_to_latlng(b))
     return nx.astar_path(
         graph,
         start_node,
         end_node,
-        heuristic=lambda a, b: haversine_m(
-            node_to_latlng(a)[0],
-            node_to_latlng(a)[1],
-            node_to_latlng(b)[0],
-            node_to_latlng(b)[1],
-        ),
+        heuristic=heuristic,
         weight=weight,
     )
 
 
+# Acumula distancia, exposición, cruces y segmentos de alto riesgo a lo largo del recorrido.
 def _route_metrics(
     graph,
     path,
@@ -551,13 +693,17 @@ def _route_metrics(
     weight,
 ) -> dict:
     segments = []
+    path_coords = []
     for index, (u, v) in enumerate(zip(path, path[1:]), start=1):
         data = _best_edge_data(graph, u, v, weight)
+        coordinates = _edge_route_points(data, node_to_latlng(u), node_to_latlng(v))
+        path_coords.extend(coordinates if not path_coords else coordinates[1:])
         segments.append(
             {
                 "id_segmento": str(data["id_segmento"]),
                 "nodo_origen": str(u),
                 "nodo_destino": str(v),
+                "clave_arista": str(data.get("edge_key", "0")),
                 "distancia_metros": round(float(data["distance_m"]), 2),
                 "tiempo_min": round(float(data["time_min"]), 3),
                 "cantidad_delitos_cercanos": int(data["nearby_crime_count"]),
@@ -567,42 +713,86 @@ def _route_metrics(
                     float(data["risk_historical_normalized"]), 6
                 ),
                 "riesgo_predicho": round(float(data["risk_predicted"]), 6),
+                "nivel_modelo": str(data.get("risk_model_level", data["risk_level"])),
+                "riesgo_mapa_maximo": round(float(data.get("risk_map_max", data["risk_segment_normalized"])), 6),
+                "metros_rojos": round(float(data.get("red_m", 0)), 3),
+                "metros_naranjas": round(float(data.get("orange_m", 0)), 3),
+                "metros_rojos_evitables": round(float(data.get("red_avoidable_m", 0)), 3),
+                "metros_naranjas_evitables": round(float(data.get("orange_avoidable_m", 0)), 3),
                 "riesgo_segmento_normalizado": round(
                     float(data["risk_segment_normalized"]), 6
                 ),
                 "nivel_riesgo": str(data["risk_level"]),
+                "coordenadas": [
+                    {"lat": round(lat, 6), "lng": round(lng, 6)}
+                    for lat, lng in coordinates
+                ],
                 "orden": index,
             }
         )
-    path_coords = [node_to_latlng(node) for node in path]
-    route_coords = [origin, *path_coords, destination]
+    if not path_coords:
+        path_coords = [node_to_latlng(node) for node in path]
     connector_distance = haversine_m(*origin, *path_coords[0]) + haversine_m(
         *path_coords[-1], *destination
     )
     segment_distance = sum(segment["distancia_metros"] for segment in segments)
     distance = connector_distance + segment_distance
-    risk_values = [segment["riesgo_segmento_normalizado"] for segment in segments]
+    distance_by_level = {
+        level: sum(segment["distancia_metros"] for segment in segments if segment["nivel_riesgo"] == level)
+        for level in ("bajo", "medio", "alto")
+    }
     weighted_risk_m = sum(
         segment["riesgo_segmento_normalizado"] * segment["distancia_metros"]
         for segment in segments
     )
     risk_total = weighted_risk_m / 1000.0
     risk_average = weighted_risk_m / segment_distance if segment_distance else 0.0
+    field_version = next((data.get("risk_field_version") for _, _, _, data in _iter_edges(graph)
+                          if data.get("risk_field_version")), None)
     return {
         "route": [
             {"lat": round(lat, 6), "lng": round(lng, 6)}
-            for lat, lng in route_coords
+            for lat, lng in path_coords
         ],
         "distance_km": round(distance / 1000, 3),
         "time_min": round(distance / (DEFAULT_SPEED_KMH * 1000 / 60), 1),
         "risk_total": round(risk_total, 6),
         "risk_score": round(risk_average, 6),
         "risk_average": round(risk_average, 6),
+        "risk_score_source": "shared_heatmap_field" if field_version else "segment_prediction",
+        "risk_field_version": field_version,
+        "model_risk_average": round(sum(segment["riesgo_predicho"] * segment["distancia_metros"] for segment in segments)
+                                     / segment_distance, 6) if segment_distance else 0,
+        "red_distance_m": round(sum(segment["metros_rojos"] for segment in segments), 3),
+        "orange_distance_m": round(sum(segment["metros_naranjas"] for segment in segments), 3),
+        "red_avoidable_m": round(sum(segment["metros_rojos_evitables"] for segment in segments), 3),
+        "orange_avoidable_m": round(sum(segment["metros_naranjas_evitables"] for segment in segments), 3),
         "risk_level": level_from_score(risk_average),
-        "high_risk_segments": sum(value >= 0.66 for value in risk_values),
+        "high_risk_segments": sum(segment["nivel_riesgo"] == "alto" for segment in segments),
+        "risk_distance_by_level_m": {level: round(value, 2) for level, value in distance_by_level.items()},
+        "access_distance_m": round(connector_distance, 2),
+        "access_connectors": [
+            [{"lat": round(lat, 6), "lng": round(lng, 6)} for lat, lng in connection]
+            for connection in ((origin, path_coords[0]), (path_coords[-1], destination))
+            if haversine_m(*connection[0], *connection[1]) > 2
+        ],
         "segments": segments,
         "node_path": [str(node) for node in path],
+        "edge_path": [f'{segment["nodo_origen"]}|{segment["nodo_destino"]}|{segment["clave_arista"]}' for segment in segments],
     }
+
+
+def _edge_route_points(data, start, end) -> list[tuple[float, float]]:
+    """Conserva la geometría vial y la orienta en el sentido del recorrido."""
+    geometry = data.get("geometry")
+    points = [(float(y), float(x)) for x, y, *_ in geometry.coords] if geometry is not None and hasattr(geometry, "coords") else []
+    if points and haversine_m(*start, *points[-1]) < haversine_m(*start, *points[0]):
+        points.reverse()
+    coordinates = []
+    for point in (start, *points, end):
+        if not coordinates or haversine_m(*coordinates[-1], *point) > 0.1:
+            coordinates.append(point)
+    return coordinates
 
 
 def _best_edge_data(graph, u, v, weight):
@@ -620,6 +810,7 @@ def _iter_edges(graph):
             yield u, v, 0, data
 
 
+# Expresa la diferencia de exposición acumulada respecto de la ruta de referencia.
 def _risk_reduction(fast_risk: float, safe_risk: float) -> float:
     if fast_risk <= 1e-12:
         return 0.0
